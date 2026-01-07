@@ -22,8 +22,11 @@ class HealthMonitor:
     def healthy(self) -> bool:
         stale = time.time() - self.last_price_ts > self.cfg.health.max_stale_price_secs
         if stale:
-            logging.warning("HealthMonitor: price feed stale")
+            logging.warning("HealthMonitor: price feed stale", extra={"action": "health_stale"})
         if self.error_streak >= self.cfg.health.max_error_streak:
-            logging.warning("HealthMonitor: error streak %d exceeded", self.error_streak)
+            logging.warning(
+                "HealthMonitor: error streak %d exceeded",
+                self.error_streak,
+                extra={"action": "health_error_streak"},
+            )
         return not stale and self.error_streak < self.cfg.health.max_error_streak
-

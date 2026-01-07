@@ -4,7 +4,7 @@ Conservative grid trading bot with simulation and sandbox support.
 
 ## Setup
 - Install deps: `python3 -m pip install -r requirements.txt`
-- Copy `config.yaml` and tweak values as needed.
+- Copy `config.example.yaml` to `config.yaml` and tweak values as needed.
 
 ## Modes
 - **simulation**: uses an in-memory exchange with a random walk price feed.
@@ -27,6 +27,8 @@ Conservative grid trading bot with simulation and sandbox support.
   - Symbol picker
   - Grid window adjustments (center/spacing/lower/upper/max exposure)
   - Live agent status (GridTrader, RiskGuard, PerformanceAnalyst, Sentiment, Health, ProfitSweeper) and logs
+  - Metrics endpoint at `/metrics` (Prometheus format)
+  - Optional API key protection with `DASHBOARD_API_KEY`
 
 ## Components
 - GridTrader maintains staggered buy levels and pairs sells after fills.
@@ -45,8 +47,18 @@ Conservative grid trading bot with simulation and sandbox support.
 - Load in the shell before running:
   - `set -a && source .env && set +a`
 - `.gitignore` already excludes `.env`.
+ - Set `DASHBOARD_API_KEY` to require a header for control endpoints.
+
+## Security
+See `SECURITY.md` for secret handling and dashboard protection.
+
+## Logs
+Trading and system logs are written to `logs/gridbot.log`.
 
 ## Persistence
 - Default SQLite path: `data/state.db`. Toggle via `persistence.enabled`.
 - Restores the last grid for the mode/symbol if `persistence.restore_last_grid` is true.
 - Records price/equity/balance snapshots per tick for history/QA.
+
+## Requirements
+See `docs/requirements.md` for the mapping of the requirements doc to repo items.

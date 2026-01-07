@@ -41,6 +41,7 @@ class GridTrader:
                 price,
                 self.cfg.grid.lower_bound,
                 self.cfg.grid.upper_bound,
+                extra={"action": "out_of_bounds"},
             )
             allow_new_buys = False
 
@@ -64,9 +65,14 @@ class GridTrader:
                     self.pending_sells.append(
                         GridOrder(level_price=sell_price, side="sell", amount=meta.amount, order_id=None)
                     )
-                    logging.info("Buy fill detected @ %.2f -> queuing sell @ %.2f", meta.level_price, sell_price)
+                    logging.info(
+                        "Buy fill detected @ %.2f -> queuing sell @ %.2f",
+                        meta.level_price,
+                        sell_price,
+                        extra={"action": "fill_buy"},
+                    )
                 elif meta.side == "sell":
-                    logging.info("Sell fill detected @ %.2f", meta.level_price)
+                    logging.info("Sell fill detected @ %.2f", meta.level_price, extra={"action": "fill_sell"})
                 to_remove.append(oid)
         for oid in to_remove:
             self.active_orders.pop(oid, None)
@@ -78,7 +84,12 @@ class GridTrader:
         exposure = current_allocation + base_value
         max_exposure = self.cfg.grid.max_exposure_quote
         if exposure >= max_exposure:
-            logging.info("Exposure %.2f exceeds max %.2f; skipping new buys", exposure, max_exposure)
+            logging.info(
+                "Exposure %.2f exceeds max %.2f; skipping new buys",
+                exposure,
+                max_exposure,
+                extra={"action": "exposure_limit"},
+            )
             return
 
         for lvl in self.buy_levels:
@@ -94,9 +105,9 @@ class GridTrader:
                 gid = str(order.get("id"))
                 self.active_orders[gid] = GridOrder(level_price=lvl, side="buy", amount=self.cfg.grid.order_size, order_id=gid)
                 exposure += lvl * self.cfg.grid.order_size
-                logging.info("Placed buy @ %.2f (exposure now %.2f)", lvl, exposure)
+                logging.info("Placed buy @ %.2f (exposure now %.2f)", lvl, exposure, extra={"action": "place_buy"})
             except Exception as exc:  # noqa: BLE001
-                logging.error("Failed to place buy @ %.2f: %s", lvl, exc)
+                logging.error("Failed to place buy @ %.2f: %s", lvl, exc, extra={"action": "place_buy_error"})
 
     def _place_pending_sells(self, connector, balances: Dict[str, float], open_orders: List[Order]) -> None:
         reserved_base = sum(o.amount for o in self.active_orders.values() if o.side == "sell")
@@ -122,9 +133,19 @@ class GridTrader:
                     order_id=gid,
                 )
                 available_base -= pending.amount
-                logging.info("Placed sell @ %.2f for %.6f", pending.level_price, pending.amount)
+                logging.info(
+                    "Placed sell @ %.2f for %.6f",
+                    pending.level_price,
+                    pending.amount,
+                    extra={"action": "place_sell"},
+                )
             except Exception as exc:  # noqa: BLE001
-                logging.error("Failed to place sell @ %.2f: %s", pending.level_price, exc)
+                logging.error(
+                    "Failed to place sell @ %.2f: %s",
+                    pending.level_price,
+                    exc,
+                    extra={"action": "place_sell_error"},
+                )
                 remaining_pending.append(pending)
         self.pending_sells = remaining_pending
 
@@ -135,7 +156,7 @@ class GridTrader:
         self.center = center_price
         self.spacing = spacing
         self.buy_levels = [center_price - spacing * i for i in range(1, self.cfg.grid.levels + 1)]
-        logging.info("Updated grid: center=%.2f spacing=%.2f", center_price, spacing)
+        logging.info("Updated grid: center=%.2f spacing=%.2f", center_price, spacing, extra={"action": "update_grid"})
 
     def seed_sell_ladder(self, connector, price: float, base_available: float) -> None:
         """
@@ -159,18 +180,23 @@ class GridTrader:
                     self.active_orders[gid] = GridOrder(level_price=sell_price, side="sell", amount=amt, order_id=gid)
                     placed += 1
                 except Exception as exc:  # noqa: BLE001
-                    logging.error("Failed to seed sell @ %.2f: %s", sell_price, exc)
+                    logging.error(
+                        "Failed to seed sell @ %.2f: %s",
+                        sell_price,
+                        exc,
+                        extra={"action": "seed_sell_error"},
+                    )
                     break
             ladder_amount -= amt
             level += 1
         if placed:
-            logging.info("Seeded %d sell orders from existing holdings", placed)
+            logging.info("Seeded %d sell orders from existing holdings", placed, extra={"action": "seed_sells"})
 
     def cancel_all(self, connector) -> None:
         for oid in list(self.active_orders.keys()):
             try:
                 connector.cancel_order(oid, symbol=self.symbol)
             except Exception as exc:  # noqa: BLE001
-                logging.error("Failed to cancel order %s: %s", oid, exc)
+                logging.error("Failed to cancel order %s: %s", oid, exc, extra={"action": "cancel_order_error"})
         self.active_orders.clear()
         self.pending_sells.clear()

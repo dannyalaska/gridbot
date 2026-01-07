@@ -7,6 +7,7 @@ from cryptocosmo.config import AppConfig, load_config
 from cryptocosmo.exchange import ExchangeConnector
 from cryptocosmo.grid_trader import GridTrader
 from cryptocosmo.health_monitor import HealthMonitor
+from cryptocosmo.logging_utils import configure_logging
 from cryptocosmo.performance_analyst import PerformanceAnalyst
 from cryptocosmo.profit_sweeper import ProfitSweeper
 from cryptocosmo.risk_guard import RiskGuard
@@ -28,11 +29,8 @@ def _extract_balances(raw_balances: Dict[str, Dict[str, float]], symbol: str) ->
 
 
 def run(cfg: AppConfig) -> None:
-    logging.basicConfig(
-        level=getattr(logging, cfg.log_level.upper(), logging.INFO),
-        format="%(asctime)s [%(levelname)s] %(message)s",
-    )
-    logging.info("Starting CryptoCosmo in %s mode", cfg.mode)
+    configure_logging(log_level=cfg.log_level, mode=cfg.mode, symbol=cfg.symbol)
+    logging.info("Starting CryptoCosmo in %s mode", cfg.mode, extra={"action": "startup"})
 
     grid_trader = GridTrader(cfg)
     risk_guard = RiskGuard(cfg)
@@ -85,7 +83,7 @@ def run(cfg: AppConfig) -> None:
                 health.reset_errors()
 
                 if fills:
-                    logging.info("Fills: %s", fills)
+                    logging.info("Fills: %s", fills, extra={"tick": tick, "action": "fills"})
 
                 logging.info(
                     "Tick %d price=%.2f equity=%.2f base=%.6f quote=%.2f open_orders=%d",
@@ -95,14 +93,18 @@ def run(cfg: AppConfig) -> None:
                     balances.get("base", 0.0),
                     balances.get("quote", 0.0),
                     len(open_orders),
+                    extra={"tick": tick, "action": "tick"},
                 )
 
                 if not health.healthy():
-                    logging.warning("Health monitor paused trading loop")
+                    logging.warning(
+                        "Health monitor paused trading loop",
+                        extra={"tick": tick, "action": "health_pause"},
+                    )
                     break
             except Exception as exc:  # noqa: BLE001
                 health.record_error()
-                logging.error("Error on tick %d: %s", tick, exc)
+                logging.error("Error on tick %d: %s", tick, exc, extra={"tick": tick, "action": "tick_error"})
             time.sleep(cfg.tick_seconds)
     except KeyboardInterrupt:
         logging.info("Shutting down")

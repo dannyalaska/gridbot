@@ -1,0 +1,60 @@
+mode: simulation  # simulation | sandbox
+symbol: BTC/USDT
+tick_seconds: 5  # loop interval in seconds
+max_ticks: 200  # 0 or negative for infinite loop
+log_level: INFO  # DEBUG | INFO | WARNING | ERROR
+
+grid:
+  center_price: 43000  # initial center, updated on live seed
+  spacing: 150  # price distance between levels
+  levels: 4  # number of buy levels below center
+  order_size: 0.001  # base amount per order
+  max_exposure_quote: 500  # maximum quote exposure
+  lower_bound: 41000  # pause buys below this price
+  upper_bound: 45000  # pause buys above this price
+
+risk:
+  daily_loss_limit_pct: 2.0  # pause if loss % vs start equity exceeds
+  max_drawdown_pct: 5.0  # pause if drawdown exceeds
+  crash_drop_pct: 1.0  # pause if price drops this % in crash window
+  crash_window_ticks: 3  # number of ticks for crash detection
+  cancel_open_orders_on_pause: true  # cancel open orders when paused
+
+performance:
+  adjust_interval_ticks: 60  # how often to adjust grid
+  center_shift_pct_limit: 0.5  # max center shift per adjust
+  spacing_min: 75  # clamp spacing
+  spacing_max: 400
+  order_size_min: 0.0005  # clamp order size
+  order_size_max: 0.002
+
+simulation:
+  starting_base: 0.0
+  starting_quote: 1000.0
+  drift: 0.0002  # random walk drift
+  volatility: 0.003  # random walk volatility
+  fee_rate: 0.0004
+  seed: 42
+
+sentiment:
+  weight: 0.15  # weight used by PerformanceAnalyst
+
+health:
+  max_stale_price_secs: 30  # pause if price feed is stale
+  max_error_streak: 3  # pause after consecutive errors
+
+profit_sweeper:
+  cosmetics_goal: 50.0
+  sweep_interval_ticks: 100
+
+exchange:
+  name: binance
+  sandbox: true
+  dry_run: true  # if false, place real sandbox orders
+  api_key_env: BINANCE_SANDBOX_API_KEY
+  api_secret_env: BINANCE_SANDBOX_API_SECRET
+
+persistence:
+  enabled: true
+  db_path: data/state.db
+  restore_last_grid: true

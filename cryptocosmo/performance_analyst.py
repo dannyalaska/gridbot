@@ -24,5 +24,5 @@ class PerformanceAnalyst:
             bounded_center,
             price,
             sentiment_score,
+            extra={"action": "adjust_grid"},
         )
-

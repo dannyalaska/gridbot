@@ -1,22 +1,40 @@
-import asyncio
+import os
+from pathlib import Path
 from dataclasses import asdict
 from typing import Optional
 
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 
 from cryptocosmo.bot_runner import BotRunner
 from cryptocosmo.config import load_config
+from cryptocosmo.metrics import render_prometheus
 
 
 app = FastAPI(title="CryptoCosmo Control Room")
+static_dir = Path(__file__).resolve().parent / "static"
+app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 config = load_config("config.yaml")
 runner = BotRunner(config)
 runner.start()
+API_KEY = os.getenv("DASHBOARD_API_KEY")
+
+
+def _require_api_key(request: Request) -> None:
+    if not API_KEY:
+        return
+    provided = request.headers.get("X-API-Key", "")
+    auth_header = request.headers.get("Authorization", "")
+    if not provided and auth_header.startswith("Bearer "):
+        provided = auth_header[len("Bearer ") :].strip()
+    if not provided or provided != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
+    key_required = "true" if API_KEY else "false"
     html = """
     <!doctype html>
     <html lang="en">
@@ -26,110 +44,7 @@ async def index() -> HTMLResponse:
         <link rel="preconnect" href="https://fonts.googleapis.com">
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
         <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600&display=swap" rel="stylesheet">
-        <style>
-            :root {
-                --bg: #0b1021;
-                --panel: #11172d;
-                --accent: #5ee7df;
-                --accent-2: #b490ff;
-                --text: #e6ecf5;
-                --muted: #7c86a5;
-                --danger: #ff6b6b;
-                --success: #4ade80;
-            }
-            * { box-sizing: border-box; }
-            body {
-                margin: 0;
-                font-family: 'Space Grotesk', system-ui, -apple-system, sans-serif;
-                background: radial-gradient(circle at 20% 20%, rgba(94,231,223,0.08), transparent 35%), radial-gradient(circle at 80% 0%, rgba(180,144,255,0.12), transparent 25%), var(--bg);
-                color: var(--text);
-                min-height: 100vh;
-            }
-            .shell {
-                max-width: 1200px;
-                margin: 0 auto;
-                padding: 32px 18px 64px;
-            }
-            header {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                flex-wrap: wrap;
-                gap: 12px;
-            }
-            .title {
-                display: flex;
-                gap: 10px;
-                align-items: baseline;
-            }
-            h1 { margin: 0; font-size: 28px; letter-spacing: -0.01em; }
-            .pill { padding: 6px 10px; border-radius: 999px; background: rgba(255,255,255,0.08); color: var(--muted); font-size: 12px; }
-            .panel {
-                background: var(--panel);
-                border: 1px solid rgba(255,255,255,0.06);
-                border-radius: 14px;
-                padding: 16px;
-                box-shadow: 0 20px 45px rgba(0,0,0,0.4);
-            }
-            .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-top: 18px; }
-            .field { display: flex; flex-direction: column; gap: 6px; }
-            label { font-size: 13px; color: var(--muted); }
-            input, select {
-                padding: 10px 12px;
-                border-radius: 10px;
-                border: 1px solid rgba(255,255,255,0.08);
-                background: rgba(255,255,255,0.04);
-                color: var(--text);
-                font-size: 14px;
-            }
-            .actions { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
-            button {
-                border: none;
-                border-radius: 12px;
-                padding: 10px 14px;
-                font-weight: 600;
-                cursor: pointer;
-                color: #0b1021;
-                transition: transform 0.08s ease, box-shadow 0.08s ease;
-            }
-            button:hover { transform: translateY(-1px); }
-            .primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); box-shadow: 0 10px 25px rgba(94,231,223,0.28); }
-            .secondary { background: rgba(255,255,255,0.12); color: var(--text); }
-            .danger { background: var(--danger); color: #fff; }
-            .grid {
-                margin-top: 18px;
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-                gap: 14px;
-            }
-            .stat {
-                display: flex;
-                flex-direction: column;
-                gap: 6px;
-            }
-            .stat h3 { margin: 0; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
-            .stat .value { font-size: 24px; font-weight: 600; }
-            .stack { display: flex; flex-direction: column; gap: 10px; }
-            .log {
-                max-height: 260px;
-                overflow: auto;
-                padding: 10px;
-                background: rgba(0,0,0,0.25);
-                border-radius: 10px;
-                font-family: 'SFMono-Regular', ui-monospace, Menlo, monospace;
-                font-size: 12px;
-            }
-            table { width: 100%; border-collapse: collapse; }
-            th, td { padding: 8px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 13px; }
-            th { color: var(--muted); font-weight: 600; }
-            .badge { padding: 4px 8px; border-radius: 999px; font-size: 12px; }
-            .ok { background: rgba(74,222,128,0.18); color: var(--success); }
-            .warn { background: rgba(255,107,107,0.18); color: var(--danger); }
-            @media (max-width: 640px) {
-                header { flex-direction: column; align-items: flex-start; }
-                h1 { font-size: 22px; }
-            }
-        </style>
+        <link rel="stylesheet" href="/static/dashboard.css">
     </head>
     <body>
         <div class="shell">
@@ -144,6 +59,7 @@ async def index() -> HTMLResponse:
                     <button class="primary" onclick="startBot()">Start / Restart</button>
                 </div>
             </header>
+            <div class="notice" id="notice" style="display:none;"></div>
 
             <div class="panel" style="margin-top:18px;">
                 <div class="controls">
@@ -183,6 +99,10 @@ async def index() -> HTMLResponse:
                     <div class="field">
                         <label for="maxExp">Max Exposure (quote)</label>
                         <input id="maxExp" type="number" step="0.01" />
+                    </div>
+                    <div class="field">
+                        <label for="apiKey">API Key (optional)</label>
+                        <input id="apiKey" type="password" placeholder="X-API-Key header" />
                     </div>
                 </div>
             </div>
@@ -245,8 +165,57 @@ async def index() -> HTMLResponse:
         </div>
 
         <script>
+            const apiKeyRequired = __API_KEY_REQUIRED__;
+
+            function setNotice(message, isError = false) {
+                const notice = document.getElementById('notice');
+                if (!notice) return;
+                if (!message) {
+                    notice.style.display = 'none';
+                    notice.textContent = '';
+                    notice.className = 'notice';
+                    return;
+                }
+                notice.style.display = 'block';
+                notice.textContent = message;
+                notice.className = isError ? 'notice error' : 'notice';
+            }
+
+            function buildHeaders(needsJson = false) {
+                const headers = {};
+                if (needsJson) {
+                    headers['Content-Type'] = 'application/json';
+                }
+                const apiKey = document.getElementById('apiKey')?.value?.trim();
+                if (apiKey) {
+                    headers['X-API-Key'] = apiKey;
+                }
+                return headers;
+            }
+
+            async function request(path, options = {}) {
+                const needsJson = Boolean(options.body);
+                const headers = Object.assign({}, buildHeaders(needsJson), options.headers || {});
+                const res = await fetch(path, Object.assign({}, options, { headers }));
+                if (!res.ok) {
+                    const text = await res.text();
+                    const message = text || `Request failed (${res.status})`;
+                    setNotice(message, true);
+                } else if (path !== '/api/state') {
+                    setNotice('Action completed', false);
+                }
+                return res;
+            }
+
+            if (apiKeyRequired) {
+                setNotice('API key required for start/stop/grid updates.', false);
+            }
+
             async function fetchState() {
-                const res = await fetch('/api/state');
+                const res = await request('/api/state');
+                if (!res.ok) {
+                    return;
+                }
                 const data = await res.json();
                 document.getElementById('price').innerText = data.price ? data.price.toFixed(2) : '-';
                 document.getElementById('equity').innerText = data.equity ? data.equity.toFixed(2) : '-';
@@ -293,6 +262,10 @@ async def index() -> HTMLResponse:
             }
 
             async function startBot() {
+                if (apiKeyRequired && !document.getElementById('apiKey').value.trim()) {
+                    setNotice('API key required to start the bot.', true);
+                    return;
+                }
                 const payload = {
                     mode: document.getElementById('mode').value,
                     symbol: document.getElementById('symbol').value,
@@ -302,16 +275,24 @@ async def index() -> HTMLResponse:
                     upper: parseFloat(document.getElementById('upper').value),
                     max_exposure: parseFloat(document.getElementById('maxExp').value),
                 };
-                await fetch('/api/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                await request('/api/start', { method: 'POST', body: JSON.stringify(payload) });
                 await fetchState();
             }
 
             async function stopBot() {
-                await fetch('/api/stop', { method: 'POST' });
+                if (apiKeyRequired && !document.getElementById('apiKey').value.trim()) {
+                    setNotice('API key required to stop the bot.', true);
+                    return;
+                }
+                await request('/api/stop', { method: 'POST' });
                 await fetchState();
             }
 
             async function applyGrid() {
+                if (apiKeyRequired && !document.getElementById('apiKey').value.trim()) {
+                    setNotice('API key required to update the grid.', true);
+                    return;
+                }
                 const payload = {
                     center: parseFloat(document.getElementById('center').value),
                     spacing: parseFloat(document.getElementById('spacing').value),
@@ -319,7 +300,7 @@ async def index() -> HTMLResponse:
                     upper: parseFloat(document.getElementById('upper').value),
                     max_exposure: parseFloat(document.getElementById('maxExp').value),
                 };
-                await fetch('/api/grid', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                await request('/api/grid', { method: 'POST', body: JSON.stringify(payload) });
                 await fetchState();
             }
 
@@ -330,6 +311,7 @@ async def index() -> HTMLResponse:
     </body>
     </html>
     """
+    html = html.replace("__API_KEY_REQUIRED__", key_required)
     return HTMLResponse(content=html)
 
 
@@ -339,8 +321,16 @@ async def state() -> dict:
     return asdict(status)
 
 
+@app.get("/metrics", response_class=PlainTextResponse)
+async def metrics() -> PlainTextResponse:
+    status = runner.get_status()
+    payload = render_prometheus(runner.get_metrics(), {"mode": status.mode, "symbol": status.symbol})
+    return PlainTextResponse(content=payload)
+
+
 @app.post("/api/stop")
-async def stop_bot() -> dict:
+async def stop_bot(request: Request) -> dict:
+    _require_api_key(request)
     runner.stop()
     return {"status": "stopped"}
 
@@ -359,6 +349,7 @@ def _to_float(value: Optional[object]) -> Optional[float]:
 
 @app.post("/api/start")
 async def start_bot(request: Request) -> dict:
+    _require_api_key(request)
     payload = await request.json()
     runner.configure_and_start(
         mode=payload.get("mode"),
@@ -374,6 +365,7 @@ async def start_bot(request: Request) -> dict:
 
 @app.post("/api/grid")
 async def grid_update(request: Request) -> dict:
+    _require_api_key(request)
     payload = await request.json()
     runner.update_grid(
         center=_to_float(payload.get("center")),

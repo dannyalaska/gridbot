@@ -47,15 +47,15 @@ class RiskGuard:
         if loss_pct >= self.cfg.risk.daily_loss_limit_pct:
             self.paused = True
             reason = f"daily loss {loss_pct:.2f}% >= limit {self.cfg.risk.daily_loss_limit_pct:.2f}%"
-            logging.warning("Pausing: %s", reason)
+            logging.warning("Pausing: %s", reason, extra={"action": "risk_pause"})
         if drawdown_pct >= self.cfg.risk.max_drawdown_pct:
             self.paused = True
             reason = f"drawdown {drawdown_pct:.2f}% >= limit {self.cfg.risk.max_drawdown_pct:.2f}%"
-            logging.warning("Pausing: %s", reason)
+            logging.warning("Pausing: %s", reason, extra={"action": "risk_pause"})
         if crash_pct >= self.cfg.risk.crash_drop_pct:
             self.paused = True
             reason = f"crash {crash_pct:.2f}% over {self.cfg.risk.crash_window_ticks} ticks"
-            logging.warning("Pausing: %s", reason)
+            logging.warning("Pausing: %s", reason, extra={"action": "risk_pause"})
 
         return RiskState(equity=equity, drawdown_pct=drawdown_pct, paused=self.paused, allow_new_buys=not self.paused, reason=reason)
 

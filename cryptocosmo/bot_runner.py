@@ -8,7 +8,7 @@ from .config import AppConfig
 from .exchange import ExchangeConnector
 from .grid_trader import GridTrader
 from .health_monitor import HealthMonitor
-from .logging_utils import InMemoryLogHandler
+from .logging_utils import InMemoryLogHandler, configure_logging
 from .performance_analyst import PerformanceAnalyst
 from .persistence import Persistence
 from .profit_sweeper import ProfitSweeper
@@ -60,16 +60,18 @@ class BotRunner:
         self.persistence: Optional[Persistence] = None
         self.run_id: Optional[int] = None
         self._seeded_from_live = False
+        self.start_time: Optional[float] = None
+        self.last_tick_latency: Optional[float] = None
 
         self.status = BotStatus(mode=cfg.mode, symbol=cfg.symbol)
 
     def _attach_log_handler(self) -> None:
-        logger = logging.getLogger()
-        if not logger.handlers:
-            logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-        if not any(isinstance(h, InMemoryLogHandler) for h in logger.handlers):
-            self.log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-            logger.addHandler(self.log_handler)
+        configure_logging(
+            log_level=self.cfg.log_level,
+            mode=self.cfg.mode,
+            symbol=self.cfg.symbol,
+            in_memory_handler=self.log_handler,
+        )
 
     def start(self) -> None:
         if self.thread and self.thread.is_alive():
@@ -77,6 +79,7 @@ class BotRunner:
         self._seeded_from_live = False
         self.stop_event.clear()
         self._build_components()
+        self.start_time = time.time()
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
 
@@ -146,6 +149,7 @@ class BotRunner:
                 )
         while not self.stop_event.is_set() and tick < max_ticks:
             tick += 1
+            tick_started = time.perf_counter()
             try:
                 if self.cfg.mode == "simulation":
                     sim_result = self.simulator.step()
@@ -184,7 +188,18 @@ class BotRunner:
                     open_orders = []
 
                 if fills:
-                    logging.info("Fills: %s", fills)
+                    logging.info("Fills: %s", fills, extra={"tick": tick, "action": "fills"})
+
+                logging.info(
+                    "Tick %d price=%.2f equity=%.2f base=%.6f quote=%.2f open_orders=%d",
+                    tick,
+                    price,
+                    risk_state.equity,
+                    balances.get("base", 0.0),
+                    balances.get("quote", 0.0),
+                    len(open_orders),
+                    extra={"tick": tick, "action": "tick"},
+                )
 
                 self._update_status(
                     tick=tick,
@@ -209,11 +224,18 @@ class BotRunner:
                     )
 
                 if not self.health.healthy():
-                    logging.warning("Health monitor paused trading loop")
+                    logging.warning(
+                        "Health monitor paused trading loop",
+                        extra={"tick": tick, "action": "health_pause"},
+                    )
                     break
             except Exception as exc:  # noqa: BLE001
                 self.health.record_error()
-                logging.error("Error on tick %d: %s", tick, exc)
+                logging.error("Error on tick %d: %s", tick, exc, extra={"tick": tick, "action": "tick_error"})
+
+            tick_latency = time.perf_counter() - tick_started
+            with self.lock:
+                self.last_tick_latency = tick_latency
 
             if self.stop_event.wait(self.cfg.tick_seconds):
                 break
@@ -278,6 +300,27 @@ class BotRunner:
     def get_status(self) -> BotStatus:
         with self.lock:
             return self.status
+
+    def get_metrics(self) -> Dict[str, float]:
+        with self.lock:
+            status = self.status
+            uptime = time.time() - self.start_time if self.start_time else 0.0
+            tick_latency = self.last_tick_latency or 0.0
+            return {
+                "running": 1.0 if status.running else 0.0,
+                "tick": float(status.tick),
+                "price": float(status.price),
+                "equity": float(status.equity),
+                "drawdown_pct": float(status.risk.get("drawdown_pct", 0.0)),
+                "risk_paused": 1.0 if status.risk.get("paused") else 0.0,
+                "health_healthy": 1.0 if status.health.get("healthy") else 0.0,
+                "error_streak": float(status.health.get("error_streak", 0.0)),
+                "open_orders": float(len(status.open_orders or [])),
+                "sentiment_score": float(status.sentiment.get("score", 0.0)),
+                "sweeper_fund_balance": float(status.sweeper.get("fund_balance", 0.0)),
+                "uptime_seconds": float(uptime),
+                "tick_latency_seconds": float(tick_latency),
+            }
 
     def _seed_grid(self, price: float, balances: Dict[str, float]) -> None:
         """
