@@ -23,6 +23,7 @@ class RiskConfig:
     crash_drop_pct: float
     crash_window_ticks: int
     cancel_open_orders_on_pause: bool
+    restore_state: bool
 
 
 @dataclass
@@ -48,6 +49,15 @@ class SimulationConfig:
 @dataclass
 class SentimentConfig:
     weight: float
+
+
+@dataclass
+class LLMRiskConfig:
+    enabled: bool
+    max_daily_loss_pct: float
+    max_drawdown_pct: float
+    max_crash_pct: float
+    block_on_news_risk: bool
 
 
 @dataclass
@@ -90,6 +100,7 @@ class AppConfig:
     performance: PerformanceConfig
     simulation: SimulationConfig
     sentiment: SentimentConfig
+    llm_risk: LLMRiskConfig
     health: HealthConfig
     profit_sweeper: ProfitSweeperConfig
     exchange: ExchangeConfig
@@ -107,6 +118,12 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
+def _optional(data: Dict[str, Any] | None, key: str, default: Any) -> Any:
+    if not data:
+        return default
+    return data.get(key, default)
+
+
 def load_config(path: str) -> AppConfig:
     cfg_raw = _load_yaml(Path(path))
     grid_raw = _require(cfg_raw, "grid")
@@ -114,6 +131,7 @@ def load_config(path: str) -> AppConfig:
     perf_raw = _require(cfg_raw, "performance")
     sim_raw = _require(cfg_raw, "simulation")
     sentiment_raw = _require(cfg_raw, "sentiment")
+    llm_raw = cfg_raw.get("llm_risk", {})
     health_raw = _require(cfg_raw, "health")
     sweeper_raw = _require(cfg_raw, "profit_sweeper")
     exch_raw = _require(cfg_raw, "exchange")
@@ -134,6 +152,7 @@ def load_config(path: str) -> AppConfig:
         crash_drop_pct=float(_require(risk_raw, "crash_drop_pct")),
         crash_window_ticks=int(_require(risk_raw, "crash_window_ticks")),
         cancel_open_orders_on_pause=bool(_require(risk_raw, "cancel_open_orders_on_pause")),
+        restore_state=bool(_optional(risk_raw, "restore_state", True)),
     )
 
     performance = PerformanceConfig(
@@ -155,6 +174,14 @@ def load_config(path: str) -> AppConfig:
     )
 
     sentiment = SentimentConfig(weight=float(_require(sentiment_raw, "weight")))
+
+    llm_risk = LLMRiskConfig(
+        enabled=bool(_optional(llm_raw, "enabled", False)),
+        max_daily_loss_pct=float(_optional(llm_raw, "max_daily_loss_pct", 0.0)),
+        max_drawdown_pct=float(_optional(llm_raw, "max_drawdown_pct", 0.0)),
+        max_crash_pct=float(_optional(llm_raw, "max_crash_pct", 0.0)),
+        block_on_news_risk=bool(_optional(llm_raw, "block_on_news_risk", True)),
+    )
 
     health = HealthConfig(
         max_stale_price_secs=int(_require(health_raw, "max_stale_price_secs")),
@@ -192,6 +219,7 @@ def load_config(path: str) -> AppConfig:
         performance=performance,
         simulation=simulation,
         sentiment=sentiment,
+        llm_risk=llm_risk,
         health=health,
         profit_sweeper=profit_sweeper,
         exchange=exchange,

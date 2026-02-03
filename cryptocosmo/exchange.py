@@ -22,7 +22,7 @@ class ExchangeConnector:
         self.dry_run = cfg.exchange.dry_run
         self.exchange = None
         self.paper_orders: List[Order] = []
-        if cfg.mode == "sandbox":
+        if cfg.mode in ("sandbox", "live"):
             self._init_exchange()
 
     def _init_exchange(self) -> None:
@@ -31,6 +31,14 @@ class ExchangeConnector:
             raise ValueError(f"Exchange {name} is not supported by ccxt")
         api_key = os.getenv(self.cfg.exchange.api_key_env, "")
         api_secret = os.getenv(self.cfg.exchange.api_secret_env, "")
+        if not api_key or not api_secret:
+            raise ValueError(
+                f"Missing API credentials in env {self.cfg.exchange.api_key_env}/{self.cfg.exchange.api_secret_env}"
+            )
+        if self.cfg.mode == "live":
+            self._require_live_confirmation()
+            if self.dry_run:
+                raise RuntimeError("Live mode requires exchange.dry_run=false to place real orders")
         self.exchange = getattr(ccxt, name)(
             {
                 "apiKey": api_key,
@@ -39,13 +47,19 @@ class ExchangeConnector:
             }
         )
         # Use built-in sandbox routing when available (Binance supports this).
-        self.exchange.set_sandbox_mode(self.cfg.exchange.sandbox)
+        sandbox_mode = self.cfg.mode == "sandbox"
+        self.exchange.set_sandbox_mode(sandbox_mode)
         logging.info(
             "Connected to %s (sandbox=%s, dry_run=%s)",
             name,
-            self.cfg.exchange.sandbox,
+            sandbox_mode,
             self.dry_run,
         )
+
+    def _require_live_confirmation(self) -> None:
+        flag = os.getenv("GRIDBOT_LIVE_TRADING", "").strip().lower()
+        if flag not in {"1", "true", "yes", "on"}:
+            raise RuntimeError("Live trading blocked. Set GRIDBOT_LIVE_TRADING=true to enable.")
 
     def get_current_price(self, symbol: str) -> float:
         ticker = self.exchange.fetch_ticker(symbol)

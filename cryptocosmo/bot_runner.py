@@ -1,6 +1,7 @@
 import logging
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -12,7 +13,7 @@ from .logging_utils import InMemoryLogHandler, configure_logging
 from .performance_analyst import PerformanceAnalyst
 from .persistence import Persistence
 from .profit_sweeper import ProfitSweeper
-from .risk_guard import RiskGuard
+from .risk_council import RiskCouncil
 from .sentiment_scout import SentimentScout
 from .simulator import Simulator
 
@@ -50,7 +51,7 @@ class BotRunner:
         self._attach_log_handler()
 
         self.grid_trader: Optional[GridTrader] = None
-        self.risk_guard: Optional[RiskGuard] = None
+        self.risk_council: Optional[RiskCouncil] = None
         self.analyst: Optional[PerformanceAnalyst] = None
         self.sentiment: Optional[SentimentScout] = None
         self.health: Optional[HealthMonitor] = None
@@ -64,6 +65,7 @@ class BotRunner:
         self.last_tick_latency: Optional[float] = None
 
         self.status = BotStatus(mode=cfg.mode, symbol=cfg.symbol)
+        self.history = deque(maxlen=400)
 
     def _attach_log_handler(self) -> None:
         configure_logging(
@@ -92,7 +94,7 @@ class BotRunner:
 
     def _build_components(self) -> None:
         self.grid_trader = GridTrader(self.cfg)
-        self.risk_guard = RiskGuard(self.cfg)
+        self.risk_council = RiskCouncil(self.cfg)
         self.analyst = PerformanceAnalyst(self.cfg)
         self.sentiment = SentimentScout()
         self.health = HealthMonitor(self.cfg)
@@ -101,7 +103,7 @@ class BotRunner:
         if self.cfg.mode == "simulation":
             self.simulator = Simulator(self.cfg)
             self.connector = self.simulator.exchange
-        elif self.cfg.mode == "sandbox":
+        elif self.cfg.mode in ("sandbox", "live"):
             self.simulator = None
             self.connector = ExchangeConnector(self.cfg)
         else:
@@ -123,6 +125,14 @@ class BotRunner:
                 self.cfg.grid.upper_bound = grid.get("upper", self.cfg.grid.upper_bound)
                 self.cfg.grid.max_exposure_quote = grid.get("max_exposure", self.cfg.grid.max_exposure_quote)
                 self.grid_trader.update_grid(self.cfg.grid.center_price, self.cfg.grid.spacing)
+
+        if self.persistence and self.cfg.risk.restore_state and self.risk_council:
+            restored_risk = self.persistence.last_run_risk(self.cfg.mode, self.cfg.symbol)
+            if restored_risk:
+                self.risk_council.restore_state(
+                    start_equity=restored_risk.get("start_equity"),
+                    max_equity=restored_risk.get("max_equity"),
+                )
 
     def _extract_balances(self, raw_balances: Dict[str, Dict[str, float]]) -> Dict[str, float]:
         base, quote = self.cfg.symbol.split("/")
@@ -169,7 +179,13 @@ class BotRunner:
                     self._seeded_from_live = True
 
                 self.health.record_price()
-                risk_state = self.risk_guard.evaluate(price, balances)
+                health_ok = self.health.healthy()
+                risk_state = self.risk_council.evaluate(
+                    price=price,
+                    balances=balances,
+                    sentiment=sentiment_snapshot,
+                    health_ok=health_ok,
+                )
                 if tick % 12 == 0:
                     sentiment_snapshot = self.sentiment.fetch()
                 self.analyst.maybe_adjust(tick, price, self.grid_trader, sentiment_score=sentiment_snapshot.score)
@@ -207,10 +223,16 @@ class BotRunner:
                     balances=balances,
                     open_orders=open_orders,
                     risk_state=risk_state,
+                    health_ok=health_ok,
                     sentiment_snapshot=sentiment_snapshot,
                 )
 
                 if self.persistence and self.run_id:
+                    self.persistence.update_risk(
+                        run_id=self.run_id,
+                        start_equity=risk_state.start_equity,
+                        max_equity=risk_state.max_equity,
+                    )
                     self.persistence.record_snapshot(
                         run_id=self.run_id,
                         tick=tick,
@@ -220,10 +242,10 @@ class BotRunner:
                         quote=balances.get("quote", 0.0),
                         paused=risk_state.paused,
                         drawdown=risk_state.drawdown_pct,
-                        healthy=self.health.healthy(),
+                        healthy=health_ok,
                     )
 
-                if not self.health.healthy():
+                if not health_ok:
                     logging.warning(
                         "Health monitor paused trading loop",
                         extra={"tick": tick, "action": "health_pause"},
@@ -249,6 +271,7 @@ class BotRunner:
         balances: Dict[str, float],
         open_orders: List[dict],
         risk_state,
+        health_ok: bool,
         sentiment_snapshot,
     ) -> None:
         with self.lock:
@@ -260,11 +283,13 @@ class BotRunner:
             self.status.risk = {
                 "paused": risk_state.paused,
                 "drawdown_pct": risk_state.drawdown_pct,
+                "loss_pct": risk_state.loss_pct,
+                "crash_pct": risk_state.crash_pct,
                 "allow_new_buys": risk_state.allow_new_buys,
                 "reason": risk_state.reason,
             }
             self.status.health = {
-                "healthy": self.health.healthy(),
+                "healthy": health_ok,
                 "error_streak": self.health.error_streak,
             }
             self.status.grid = {
@@ -296,10 +321,29 @@ class BotRunner:
                         "max_exposure": self.cfg.grid.max_exposure_quote,
                     },
                 )
+            self.history.append(
+                {
+                    "tick": tick,
+                    "price": price,
+                    "equity": risk_state.equity,
+                    "base": balances.get("base", 0.0),
+                    "quote": balances.get("quote", 0.0),
+                    "paused": risk_state.paused,
+                    "drawdown": risk_state.drawdown_pct,
+                    "healthy": health_ok,
+                    "timestamp": time.time(),
+                }
+            )
 
     def get_status(self) -> BotStatus:
         with self.lock:
             return self.status
+
+    def get_history(self, limit: int = 300) -> List[dict]:
+        with self.lock:
+            if self.persistence and self.run_id:
+                return self.persistence.recent_snapshots(self.run_id, limit=limit)
+            return list(self.history)[-limit:]
 
     def get_metrics(self) -> Dict[str, float]:
         with self.lock:
@@ -312,6 +356,8 @@ class BotRunner:
                 "price": float(status.price),
                 "equity": float(status.equity),
                 "drawdown_pct": float(status.risk.get("drawdown_pct", 0.0)),
+                "loss_pct": float(status.risk.get("loss_pct", 0.0)),
+                "crash_pct": float(status.risk.get("crash_pct", 0.0)),
                 "risk_paused": 1.0 if status.risk.get("paused") else 0.0,
                 "health_healthy": 1.0 if status.health.get("healthy") else 0.0,
                 "error_streak": float(status.health.get("error_streak", 0.0)),

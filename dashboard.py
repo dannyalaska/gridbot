@@ -17,8 +17,28 @@ static_dir = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 config = load_config("config.yaml")
 runner = BotRunner(config)
-runner.start()
+AUTO_START = os.getenv("GRIDBOT_AUTOSTART", "").strip().lower() in {"1", "true", "yes", "on"}
+if AUTO_START:
+    runner.start()
 API_KEY = os.getenv("DASHBOARD_API_KEY")
+
+
+def _is_local_request(request: Request) -> bool:
+    if not request.client:
+        return False
+    host = request.client.host or ""
+    if host in {"127.0.0.1", "::1", "localhost"}:
+        return True
+    if host.startswith("127.") or host.startswith("::ffff:127."):
+        return True
+    return False
+
+
+@app.middleware("http")
+async def localhost_only(request: Request, call_next):
+    if not _is_local_request(request):
+        return PlainTextResponse("Localhost access only", status_code=403)
+    return await call_next(request)
 
 
 def _require_api_key(request: Request) -> None:
@@ -68,6 +88,7 @@ async def index() -> HTMLResponse:
                         <select id="mode">
                             <option value="simulation">Simulation</option>
                             <option value="sandbox">Sandbox (Binance testnet)</option>
+                            <option value="live">Live (Binance spot)</option>
                         </select>
                     </div>
                     <div class="field">
@@ -120,7 +141,7 @@ async def index() -> HTMLResponse:
                     <div id="sweeper" style="color:var(--muted);">-</div>
                 </div>
                 <div class="panel stat">
-                    <h3>RiskGuard</h3>
+                    <h3>Risk Council</h3>
                     <div class="value" id="risk">-</div>
                     <div id="drawdown" style="color:var(--muted);">-</div>
                 </div>
@@ -138,6 +159,80 @@ async def index() -> HTMLResponse:
                     <h3>Health</h3>
                     <div class="value" id="health">-</div>
                     <div id="healthDetail" style="color:var(--muted);">-</div>
+                </div>
+            </div>
+
+            <div class="grid" style="grid-template-columns: 2fr 1fr;">
+                <div class="panel chart">
+                    <div class="panel-head">
+                        <h3>Performance History</h3>
+                        <span class="badge subtle" id="historySpan">-</span>
+                    </div>
+                    <canvas id="performanceChart"></canvas>
+                    <div class="legend">
+                        <span class="legend-item"><span class="dot equity"></span>Equity</span>
+                        <span class="legend-item"><span class="dot price"></span>Price</span>
+                    </div>
+                </div>
+                <div class="panel chart">
+                    <div class="panel-head">
+                        <h3>Portfolio Allocation</h3>
+                        <span class="badge subtle" id="allocationTotal">-</span>
+                    </div>
+                    <div class="allocation-bar">
+                        <div class="allocation-segment base" id="allocationBase"></div>
+                        <div class="allocation-segment quote" id="allocationQuote"></div>
+                    </div>
+                    <div class="allocation-labels" id="allocationLabels">-</div>
+                    <div class="mini-metrics">
+                        <div>
+                            <div class="metric-label">Base value</div>
+                            <div class="metric-value" id="baseValue">-</div>
+                        </div>
+                        <div>
+                            <div class="metric-label">Quote value</div>
+                            <div class="metric-value" id="quoteValue">-</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="grid" style="grid-template-columns: 1fr 1fr;">
+                <div class="panel chart">
+                    <div class="panel-head">
+                        <h3>Grid Map</h3>
+                        <span class="badge subtle" id="gridRangeLabel">-</span>
+                    </div>
+                    <canvas id="gridChart"></canvas>
+                    <div class="legend">
+                        <span class="legend-item"><span class="dot center"></span>Center</span>
+                        <span class="legend-item"><span class="dot buy"></span>Buys</span>
+                        <span class="legend-item"><span class="dot sell"></span>Sells</span>
+                    </div>
+                </div>
+                <div class="panel chart">
+                    <div class="panel-head">
+                        <h3>Risk & Limits</h3>
+                        <span class="badge subtle" id="riskStatus">-</span>
+                    </div>
+                    <div class="risk-grid">
+                        <div>
+                            <div class="metric-label">Loss</div>
+                            <div class="metric-value" id="lossPct">-</div>
+                        </div>
+                        <div>
+                            <div class="metric-label">Drawdown</div>
+                            <div class="metric-value" id="drawdownPct">-</div>
+                        </div>
+                        <div>
+                            <div class="metric-label">Crash</div>
+                            <div class="metric-value" id="crashPct">-</div>
+                        </div>
+                        <div>
+                            <div class="metric-label">Exposure cap</div>
+                            <div class="metric-value" id="maxExposure">-</div>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -166,6 +261,8 @@ async def index() -> HTMLResponse:
 
         <script>
             const apiKeyRequired = __API_KEY_REQUIRED__;
+            let historyCache = [];
+            let lastState = null;
 
             function setNotice(message, isError = false) {
                 const notice = document.getElementById('notice');
@@ -201,7 +298,7 @@ async def index() -> HTMLResponse:
                     const text = await res.text();
                     const message = text || `Request failed (${res.status})`;
                     setNotice(message, true);
-                } else if (path !== '/api/state') {
+                } else if (!['/api/state', '/api/history'].includes(path)) {
                     setNotice('Action completed', false);
                 }
                 return res;
@@ -211,12 +308,245 @@ async def index() -> HTMLResponse:
                 setNotice('API key required for start/stop/grid updates.', false);
             }
 
+            function getPalette() {
+                const styles = getComputedStyle(document.documentElement);
+                return {
+                    equity: styles.getPropertyValue('--accent').trim() || '#5ee7df',
+                    price: styles.getPropertyValue('--accent-2').trim() || '#b490ff',
+                    buy: styles.getPropertyValue('--accent').trim() || '#5ee7df',
+                    sell: styles.getPropertyValue('--danger').trim() || '#ff6b6b',
+                    center: styles.getPropertyValue('--accent-3').trim() || '#ffd166',
+                    grid: 'rgba(255,255,255,0.08)',
+                };
+            }
+
+            function prepareCanvas(canvas) {
+                const rect = canvas.getBoundingClientRect();
+                const dpr = window.devicePixelRatio || 1;
+                canvas.width = rect.width * dpr;
+                canvas.height = rect.height * dpr;
+                const ctx = canvas.getContext('2d');
+                ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                return { ctx, width: rect.width, height: rect.height };
+            }
+
+            function drawPerformanceChart(history) {
+                const canvas = document.getElementById('performanceChart');
+                if (!canvas) return;
+                const { ctx, width, height } = prepareCanvas(canvas);
+                ctx.clearRect(0, 0, width, height);
+                if (!history.length) {
+                    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+                    ctx.font = '12px Space Grotesk, sans-serif';
+                    ctx.fillText('Waiting for history...', 12, 20);
+                    return;
+                }
+                const baseEquity = history[0].equity || 1;
+                const basePrice = history[0].price || 1;
+                const equitySeries = history.map(point => (point.equity || 0) / baseEquity * 100);
+                const priceSeries = history.map(point => (point.price || 0) / basePrice * 100);
+                const minVal = Math.min(...equitySeries, ...priceSeries);
+                const maxVal = Math.max(...equitySeries, ...priceSeries);
+                const pad = (maxVal - minVal) * 0.1 || 1;
+                const yMin = minVal - pad;
+                const yMax = maxVal + pad;
+                const palette = getPalette();
+
+                ctx.strokeStyle = palette.grid;
+                ctx.lineWidth = 1;
+                for (let i = 1; i <= 3; i += 1) {
+                    const y = (height / 4) * i;
+                    ctx.beginPath();
+                    ctx.moveTo(0, y);
+                    ctx.lineTo(width, y);
+                    ctx.stroke();
+                }
+
+                const baselineY = height - ((100 - yMin) / (yMax - yMin)) * height;
+                ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+                ctx.beginPath();
+                ctx.moveTo(0, baselineY);
+                ctx.lineTo(width, baselineY);
+                ctx.stroke();
+
+                const xStep = history.length > 1 ? width / (history.length - 1) : width;
+                function drawSeries(series, color) {
+                    ctx.strokeStyle = color;
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    series.forEach((value, index) => {
+                        const x = index * xStep;
+                        const y = height - ((value - yMin) / (yMax - yMin)) * height;
+                        if (index === 0) {
+                            ctx.moveTo(x, y);
+                        } else {
+                            ctx.lineTo(x, y);
+                        }
+                    });
+                    ctx.stroke();
+                }
+
+                drawSeries(priceSeries, palette.price);
+                drawSeries(equitySeries, palette.equity);
+            }
+
+            function drawGridMap(state) {
+                const canvas = document.getElementById('gridChart');
+                if (!canvas) return;
+                const { ctx, width, height } = prepareCanvas(canvas);
+                ctx.clearRect(0, 0, width, height);
+                if (!state) {
+                    return;
+                }
+
+                const price = Number(state.price || 0);
+                const lower = Number(state.grid?.lower || 0);
+                const upper = Number(state.grid?.upper || 0);
+                const center = Number(state.grid?.center || 0);
+                let minPrice = Math.min(...[price, lower, center].filter(val => Number.isFinite(val) && val > 0));
+                let maxPrice = Math.max(...[price, upper, center].filter(val => Number.isFinite(val) && val > 0));
+                if (!Number.isFinite(minPrice) || !Number.isFinite(maxPrice) || minPrice === maxPrice) {
+                    minPrice = price * 0.98 || 0;
+                    maxPrice = price * 1.02 || 1;
+                }
+                const pad = (maxPrice - minPrice) * 0.08 || 1;
+                minPrice -= pad;
+                maxPrice += pad;
+
+                function yFor(val) {
+                    return height - ((val - minPrice) / (maxPrice - minPrice)) * height;
+                }
+
+                const palette = getPalette();
+                ctx.strokeStyle = palette.grid;
+                ctx.lineWidth = 1;
+                for (let i = 1; i <= 4; i += 1) {
+                    const y = (height / 5) * i;
+                    ctx.beginPath();
+                    ctx.moveTo(0, y);
+                    ctx.lineTo(width, y);
+                    ctx.stroke();
+                }
+
+                if (lower) {
+                    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+                    ctx.beginPath();
+                    ctx.moveTo(0, yFor(lower));
+                    ctx.lineTo(width, yFor(lower));
+                    ctx.stroke();
+                }
+                if (upper) {
+                    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+                    ctx.beginPath();
+                    ctx.moveTo(0, yFor(upper));
+                    ctx.lineTo(width, yFor(upper));
+                    ctx.stroke();
+                }
+                if (center) {
+                    ctx.strokeStyle = palette.center;
+                    ctx.beginPath();
+                    ctx.moveTo(0, yFor(center));
+                    ctx.lineTo(width, yFor(center));
+                    ctx.stroke();
+                }
+
+                if (price) {
+                    ctx.strokeStyle = 'rgba(94,231,223,0.6)';
+                    ctx.setLineDash([6, 6]);
+                    ctx.beginPath();
+                    ctx.moveTo(0, yFor(price));
+                    ctx.lineTo(width, yFor(price));
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                }
+
+                const orders = state.open_orders || [];
+                orders.forEach((order, idx) => {
+                    const side = (order.side || '').toLowerCase();
+                    const orderPrice = Number(order.price || 0);
+                    if (!orderPrice) return;
+                    const x = side === 'sell' ? width * 0.72 : width * 0.28;
+                    const y = yFor(orderPrice);
+                    ctx.fillStyle = side === 'sell' ? palette.sell : palette.buy;
+                    ctx.beginPath();
+                    ctx.arc(x + (idx % 3) * 6 - 6, y, 3, 0, Math.PI * 2);
+                    ctx.fill();
+                });
+
+                ctx.fillStyle = 'rgba(255,255,255,0.6)';
+                ctx.font = '11px Space Grotesk, sans-serif';
+                ctx.fillText(`Price ${price ? price.toFixed(2) : '-'}`, 10, 16);
+            }
+
+            function updateAllocation(data) {
+                const price = Number(data.price || 0);
+                const base = Number(data.balances?.base || 0);
+                const quote = Number(data.balances?.quote || 0);
+                const baseValue = base * price;
+                const total = baseValue + quote;
+                const basePct = total > 0 ? (baseValue / total) * 100 : 0;
+                const quotePct = total > 0 ? 100 - basePct : 0;
+                const allocationBase = document.getElementById('allocationBase');
+                const allocationQuote = document.getElementById('allocationQuote');
+                if (allocationBase && allocationQuote) {
+                    allocationBase.style.width = `${basePct}%`;
+                    allocationQuote.style.width = `${quotePct}%`;
+                }
+                const allocationLabels = document.getElementById('allocationLabels');
+                if (allocationLabels) {
+                    allocationLabels.innerText = `Base ${basePct.toFixed(1)}% · Quote ${quotePct.toFixed(1)}%`;
+                }
+                const allocationTotal = document.getElementById('allocationTotal');
+                if (allocationTotal) {
+                    allocationTotal.innerText = total ? `Total ${total.toFixed(2)}` : '-';
+                }
+                const baseValueEl = document.getElementById('baseValue');
+                const quoteValueEl = document.getElementById('quoteValue');
+                if (baseValueEl) baseValueEl.innerText = baseValue ? baseValue.toFixed(2) : '-';
+                if (quoteValueEl) quoteValueEl.innerText = quote ? quote.toFixed(2) : '-';
+            }
+
+            function updateRiskPanel(data) {
+                const lossPct = Number(data.risk?.loss_pct || 0).toFixed(2);
+                const drawdownPct = Number(data.risk?.drawdown_pct || 0).toFixed(2);
+                const crashPct = Number(data.risk?.crash_pct || 0).toFixed(2);
+                const maxExposure = Number(data.grid?.max_exposure || 0).toFixed(2);
+                const riskStatus = document.getElementById('riskStatus');
+                if (riskStatus) {
+                    riskStatus.innerText = data.risk?.paused ? 'Paused' : 'Active';
+                    riskStatus.className = data.risk?.paused ? 'badge warn' : 'badge ok';
+                }
+                const lossEl = document.getElementById('lossPct');
+                const drawdownEl = document.getElementById('drawdownPct');
+                const crashEl = document.getElementById('crashPct');
+                const exposureEl = document.getElementById('maxExposure');
+                if (lossEl) lossEl.innerText = `${lossPct}%`;
+                if (drawdownEl) drawdownEl.innerText = `${drawdownPct}%`;
+                if (crashEl) crashEl.innerText = `${crashPct}%`;
+                if (exposureEl) exposureEl.innerText = maxExposure;
+            }
+
+            async function fetchHistory() {
+                const res = await request('/api/history?limit=240');
+                if (!res.ok) {
+                    return;
+                }
+                const payload = await res.json();
+                historyCache = payload.history || [];
+                drawPerformanceChart(historyCache);
+                const historySpan = document.getElementById('historySpan');
+                if (historySpan) {
+                    historySpan.innerText = historyCache.length ? `Last ${historyCache.length} pts` : '-';
+                }
+            }
+
             async function fetchState() {
                 const res = await request('/api/state');
                 if (!res.ok) {
                     return;
                 }
                 const data = await res.json();
+                lastState = data;
                 document.getElementById('price').innerText = data.price ? data.price.toFixed(2) : '-';
                 document.getElementById('equity').innerText = data.equity ? data.equity.toFixed(2) : '-';
                 document.getElementById('balances').innerText = `Base: ${Number(data.balances?.base || 0).toFixed(4)} · Quote: ${Number(data.balances?.quote || 0).toFixed(2)}`;
@@ -233,6 +563,14 @@ async def index() -> HTMLResponse:
                 document.getElementById('health').className = data.health?.healthy ? 'value ok' : 'value warn';
                 document.getElementById('healthDetail').innerText = `Errors: ${data.health?.error_streak || 0}`;
                 document.getElementById('symbolLabel').innerText = `${data.symbol} · Tick ${data.tick}`;
+
+                updateAllocation(data);
+                updateRiskPanel(data);
+                drawGridMap(data);
+                const gridRangeLabel = document.getElementById('gridRangeLabel');
+                if (gridRangeLabel) {
+                    gridRangeLabel.innerText = data.grid ? `${Number(data.grid.lower || 0).toFixed(2)} – ${Number(data.grid.upper || 0).toFixed(2)}` : '-';
+                }
 
                 const runningFlag = document.getElementById('runningFlag');
                 runningFlag.innerText = data.running ? 'Running' : 'Stopped';
@@ -277,6 +615,7 @@ async def index() -> HTMLResponse:
                 };
                 await request('/api/start', { method: 'POST', body: JSON.stringify(payload) });
                 await fetchState();
+                await fetchHistory();
             }
 
             async function stopBot() {
@@ -286,6 +625,7 @@ async def index() -> HTMLResponse:
                 }
                 await request('/api/stop', { method: 'POST' });
                 await fetchState();
+                await fetchHistory();
             }
 
             async function applyGrid() {
@@ -302,11 +642,19 @@ async def index() -> HTMLResponse:
                 };
                 await request('/api/grid', { method: 'POST', body: JSON.stringify(payload) });
                 await fetchState();
+                await fetchHistory();
             }
 
             async function refreshState() { await fetchState(); }
             fetchState();
+            fetchHistory();
             setInterval(fetchState, 2000);
+            setInterval(fetchHistory, 10000);
+
+            window.addEventListener('resize', () => {
+                drawPerformanceChart(historyCache);
+                drawGridMap(lastState);
+            });
         </script>
     </body>
     </html>
@@ -319,6 +667,12 @@ async def index() -> HTMLResponse:
 async def state() -> dict:
     status = runner.get_status()
     return asdict(status)
+
+
+@app.get("/api/history")
+async def history(limit: int = 300) -> dict:
+    limit = max(10, min(limit, 1000))
+    return {"history": runner.get_history(limit=limit)}
 
 
 @app.get("/metrics", response_class=PlainTextResponse)
@@ -381,4 +735,4 @@ if __name__ == "__main__":
     import uvicorn
 
     # Default to 8787 to avoid conflicts with other local services.
-    uvicorn.run("dashboard:app", host="0.0.0.0", port=8787, reload=False)
+    uvicorn.run("dashboard:app", host="127.0.0.1", port=8787, reload=False)

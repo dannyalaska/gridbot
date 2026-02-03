@@ -1,4 +1,4 @@
-mode: simulation  # simulation | sandbox
+mode: simulation  # simulation | sandbox | live
 symbol: BTC/USDT
 tick_seconds: 5  # loop interval in seconds
 max_ticks: 200  # 0 or negative for infinite loop
@@ -19,6 +19,7 @@ risk:
   crash_drop_pct: 1.0  # pause if price drops this % in crash window
   crash_window_ticks: 3  # number of ticks for crash detection
   cancel_open_orders_on_pause: true  # cancel open orders when paused
+  restore_state: true  # carry over risk state across restarts
 
 performance:
   adjust_interval_ticks: 60  # how often to adjust grid
@@ -39,6 +40,13 @@ simulation:
 sentiment:
   weight: 0.15  # weight used by PerformanceAnalyst
 
+llm_risk:
+  enabled: false  # enable LLM risk vetoes
+  max_daily_loss_pct: 1.0
+  max_drawdown_pct: 3.0
+  max_crash_pct: 0.8
+  block_on_news_risk: true
+
 health:
   max_stale_price_secs: 30  # pause if price feed is stale
   max_error_streak: 3  # pause after consecutive errors
@@ -50,7 +58,7 @@ profit_sweeper:
 exchange:
   name: binance
   sandbox: true
-  dry_run: true  # if false, place real sandbox orders
+  dry_run: true  # if false, place real orders (set GRIDBOT_LIVE_TRADING=true for live)
   api_key_env: BINANCE_SANDBOX_API_KEY
   api_secret_env: BINANCE_SANDBOX_API_SECRET
 

@@ -10,9 +10,13 @@ from .config import AppConfig
 class RiskState:
     equity: float
     drawdown_pct: float
+    loss_pct: float
+    crash_pct: float
     paused: bool
     allow_new_buys: bool
     reason: str | None = None
+    start_equity: float | None = None
+    max_equity: float | None = None
 
 
 class RiskGuard:
@@ -57,7 +61,23 @@ class RiskGuard:
             reason = f"crash {crash_pct:.2f}% over {self.cfg.risk.crash_window_ticks} ticks"
             logging.warning("Pausing: %s", reason, extra={"action": "risk_pause"})
 
-        return RiskState(equity=equity, drawdown_pct=drawdown_pct, paused=self.paused, allow_new_buys=not self.paused, reason=reason)
+        return RiskState(
+            equity=equity,
+            drawdown_pct=drawdown_pct,
+            loss_pct=loss_pct,
+            crash_pct=crash_pct,
+            paused=self.paused,
+            allow_new_buys=not self.paused,
+            reason=reason,
+            start_equity=self.start_equity,
+            max_equity=self.max_equity,
+        )
+
+    def restore_state(self, start_equity: float | None, max_equity: float | None) -> None:
+        if start_equity is not None:
+            self.start_equity = float(start_equity)
+        if max_equity is not None:
+            self.max_equity = float(max_equity)
 
     def _crash_drop(self) -> float:
         if len(self.recent_prices) < self.recent_prices.maxlen:
