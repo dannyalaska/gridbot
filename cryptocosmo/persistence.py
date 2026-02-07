@@ -14,8 +14,17 @@ class Persistence:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._apply_pragmas()
         self.conn.row_factory = sqlite3.Row
         self._init_schema()
+
+    def _apply_pragmas(self) -> None:
+        with self.lock:
+            cur = self.conn.cursor()
+            cur.execute("PRAGMA journal_mode=WAL;")
+            cur.execute("PRAGMA synchronous=NORMAL;")
+            cur.execute("PRAGMA temp_store=MEMORY;")
+            self.conn.commit()
 
     def _init_schema(self) -> None:
         with self.lock:
@@ -49,6 +58,12 @@ class Persistence:
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(run_id) REFERENCES runs(id)
                 );
+                """
+            )
+            cur.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_snapshots_run_id_id ON snapshots(run_id, id);
+                CREATE INDEX IF NOT EXISTS idx_runs_mode_symbol_id ON runs(mode, symbol, id);
                 """
             )
             self.conn.commit()
@@ -227,3 +242,11 @@ class Persistence:
                     }
                 )
             return snapshots
+
+
+    def close(self) -> None:
+        with self.lock:
+            try:
+                self.conn.commit()
+            finally:
+                self.conn.close()

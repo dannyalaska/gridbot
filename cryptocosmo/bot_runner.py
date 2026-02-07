@@ -89,6 +89,11 @@ class BotRunner:
         self.stop_event.set()
         if self.thread:
             self.thread.join(timeout=2)
+        if self.persistence:
+            try:
+                self.persistence.close()
+            except Exception:  # noqa: BLE001
+                pass
         with self.lock:
             self.status.running = False
 
@@ -265,6 +270,11 @@ class BotRunner:
 
             if self.stop_event.wait(self.cfg.tick_seconds):
                 break
+        if self.persistence:
+            try:
+                self.persistence.close()
+            except Exception:  # noqa: BLE001
+                pass
         with self.lock:
             self.status.running = False
 

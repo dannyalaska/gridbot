@@ -6,6 +6,31 @@ from typing import Dict, List, Optional
 
 import ccxt
 
+import random
+
+# Retryable ccxt exception types (best-effort; ccxt raises these for transient issues)
+RETRYABLE_CCXT_EXC = (
+    getattr(ccxt, 'NetworkError', Exception),
+    getattr(ccxt, 'RequestTimeout', Exception),
+    getattr(ccxt, 'DDoSProtection', Exception),
+    getattr(ccxt, 'RateLimitExceeded', Exception),
+    getattr(ccxt, 'ExchangeNotAvailable', Exception),
+)
+
+
+def _retry(fn, *, tries: int = 3, base_delay: float = 0.5, max_delay: float = 6.0):
+    last = None
+    for attempt in range(tries):
+        try:
+            return fn()
+        except RETRYABLE_CCXT_EXC as exc:  # noqa: BLE001
+            last = exc
+            delay = min(max_delay, base_delay * (2 ** attempt))
+            delay = delay + random.random() * 0.25
+            time.sleep(delay)
+    if last:
+        raise last
+
 from .config import AppConfig
 
 
@@ -62,11 +87,11 @@ class ExchangeConnector:
             raise RuntimeError("Live trading blocked. Set GRIDBOT_LIVE_TRADING=true to enable.")
 
     def get_current_price(self, symbol: str) -> float:
-        ticker = self.exchange.fetch_ticker(symbol)
+        ticker = _retry(lambda: self.exchange.fetch_ticker(symbol))
         return float(ticker["last"])
 
     def get_balances(self) -> Dict[str, Dict[str, float]]:
-        bal = self.exchange.fetch_balance()
+        bal = _retry(lambda: self.exchange.fetch_balance())
         return {"free": bal.get("free", {}), "total": bal.get("total", {})}
 
     def place_limit_buy(self, symbol: str, price: float, amount: float) -> Order:
@@ -75,7 +100,7 @@ class ExchangeConnector:
             self.paper_orders.append(order)
             logging.info("Dry run BUY %s %s @ %s", amount, symbol, price)
             return order
-        return self.exchange.create_limit_buy_order(symbol, amount, price)
+        return _retry(lambda: self.exchange.create_limit_buy_order(symbol, amount, price))
 
     def place_limit_sell(self, symbol: str, price: float, amount: float) -> Order:
         if self.dry_run:
@@ -83,12 +108,12 @@ class ExchangeConnector:
             self.paper_orders.append(order)
             logging.info("Dry run SELL %s %s @ %s", amount, symbol, price)
             return order
-        return self.exchange.create_limit_sell_order(symbol, amount, price)
+        return _retry(lambda: self.exchange.create_limit_sell_order(symbol, amount, price))
 
     def get_open_orders(self, symbol: Optional[str] = None) -> List[Order]:
         if self.dry_run:
             return list(self.paper_orders)
-        return self.exchange.fetch_open_orders(symbol=symbol)
+        return _retry(lambda: self.exchange.fetch_open_orders(symbol=symbol))
 
     def get_order(self, order_id: str, symbol: Optional[str] = None) -> Optional[Order]:
         """Best-effort fetch for a single order.
@@ -109,7 +134,7 @@ class ExchangeConnector:
             logging.info("Dry run cancel %s", order_id)
             self.paper_orders = [o for o in self.paper_orders if o.get("id") != order_id]
             return
-        self.exchange.cancel_order(order_id, symbol=symbol)
+        _retry(lambda: self.exchange.cancel_order(order_id, symbol=symbol))
 
 
 class SimulationExchange:
