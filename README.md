@@ -8,6 +8,7 @@ Conservative grid trading bot with simulation and sandbox support.
 
 ## Modes
 - **simulation**: uses an in-memory exchange with a random walk price feed.
+- **paper**: uses live public prices (ccxt ticker) but fills orders locally (no keys, no real orders).
 - **sandbox**: uses `ccxt` against Binance spot testnet (`testnet.binance.vision`). Set env vars:
   - `BINANCE_SANDBOX_API_KEY`
   - `BINANCE_SANDBOX_API_SECRET`
@@ -19,6 +20,7 @@ Conservative grid trading bot with simulation and sandbox support.
 
 ## Run
 - Simulation: `python3 main.py --mode simulation`
+- Paper: `python3 main.py --mode paper`
 - Sandbox: `python3 main.py --mode sandbox`
 - Live: `python3 main.py --mode live`
 

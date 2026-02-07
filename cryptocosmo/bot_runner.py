@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from .config import AppConfig
-from .exchange import ExchangeConnector
+from .exchange import ExchangeConnector, PaperExchange, PublicPriceFeed
 from .grid_trader import GridTrader
 from .health_monitor import HealthMonitor
 from .logging_utils import InMemoryLogHandler, configure_logging
@@ -58,6 +58,7 @@ class BotRunner:
         self.sweeper: Optional[ProfitSweeper] = None
         self.simulator: Optional[Simulator] = None
         self.connector = None
+        self.pricefeed = None
         self.persistence: Optional[Persistence] = None
         self.run_id: Optional[int] = None
         self._seeded_from_live = False
@@ -108,8 +109,14 @@ class BotRunner:
         if self.cfg.mode == "simulation":
             self.simulator = Simulator(self.cfg)
             self.connector = self.simulator.exchange
+            self.pricefeed = None
+        elif self.cfg.mode == "paper":
+            self.simulator = None
+            self.pricefeed = PublicPriceFeed(self.cfg)
+            self.connector = PaperExchange(starting_base=self.cfg.simulation.starting_base, starting_quote=self.cfg.simulation.starting_quote, fee_rate=self.cfg.simulation.fee_rate)
         elif self.cfg.mode in ("sandbox", "live"):
             self.simulator = None
+            self.pricefeed = None
             self.connector = ExchangeConnector(self.cfg)
         else:
             raise ValueError(f"Unsupported mode {self.cfg.mode}")
@@ -171,6 +178,12 @@ class BotRunner:
                     price = sim_result.price
                     balances = sim_result.balances
                     fills = sim_result.fills
+                    open_orders = self.connector.get_open_orders(symbol=self.cfg.symbol)
+                elif self.cfg.mode == "paper":
+                    price = self.pricefeed.get_current_price(self.cfg.symbol)
+                    self.connector.set_price(price)
+                    fills = self.connector.consume_fills()
+                    balances = self.connector.get_balances()
                     open_orders = self.connector.get_open_orders(symbol=self.cfg.symbol)
                 else:
                     price = self.connector.get_current_price(self.cfg.symbol)

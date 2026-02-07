@@ -4,7 +4,7 @@ import time
 from typing import Dict
 
 from cryptocosmo.config import AppConfig, load_config
-from cryptocosmo.exchange import ExchangeConnector
+from cryptocosmo.exchange import ExchangeConnector, PaperExchange, PublicPriceFeed
 from cryptocosmo.grid_trader import GridTrader
 from cryptocosmo.health_monitor import HealthMonitor
 from cryptocosmo.logging_utils import configure_logging
@@ -19,7 +19,7 @@ from cryptocosmo.simulator import Simulator
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="CryptoCosmo grid bot")
     parser.add_argument("--config", default="config.yaml", help="Path to config file")
-    parser.add_argument("--mode", choices=["simulation", "sandbox", "live"], help="Override mode")
+    parser.add_argument("--mode", choices=["simulation", "paper", "sandbox", "live"], help="Override mode")
     return parser.parse_args()
 
 
@@ -44,9 +44,15 @@ def run(cfg: AppConfig) -> None:
     if cfg.mode == "simulation":
         simulator = Simulator(cfg)
         connector = simulator.exchange
+        pricefeed = None
+    elif cfg.mode == "paper":
+        simulator = None
+        pricefeed = PublicPriceFeed(cfg)
+        connector = PaperExchange(starting_base=cfg.simulation.starting_base, starting_quote=cfg.simulation.starting_quote, fee_rate=cfg.simulation.fee_rate)
     elif cfg.mode in ("sandbox", "live"):
         connector = ExchangeConnector(cfg)
         simulator = None
+        pricefeed = None
     else:
         raise ValueError(f"Unsupported mode {cfg.mode}")
 
