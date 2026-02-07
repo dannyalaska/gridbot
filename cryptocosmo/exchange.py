@@ -45,7 +45,11 @@ class PublicPriceFeed:
     """
 
     def __init__(self, cfg: AppConfig):
-        name = cfg.exchange.name
+        # Binance public endpoints may return HTTP 451 in some locations.
+        # For paper trading we only need a liquid public price feed, so default to Coinbase when exchange=name is binance.
+        name = (cfg.exchange.name or "").strip().lower()
+        if name == 'binance':
+            name = 'coinbase'
         if not hasattr(ccxt, name):
             raise ValueError(f"Exchange {name} is not supported by ccxt")
         self.exchange = getattr(ccxt, name)({"enableRateLimit": True})
@@ -53,8 +57,14 @@ class PublicPriceFeed:
             self.exchange.set_sandbox_mode(False)
         except Exception:  # noqa: BLE001
             pass
+    def _normalize_symbol(self, symbol: str) -> str:
+        if symbol.endswith("/USDT"):
+            return symbol.replace("/USDT", "/USD")
+        return symbol
+
 
     def get_current_price(self, symbol: str) -> float:
+        symbol = self._normalize_symbol(symbol)
         ticker = _retry(lambda: self.exchange.fetch_ticker(symbol))
         return float(ticker["last"])
 
@@ -110,6 +120,7 @@ class ExchangeConnector:
             raise RuntimeError("Live trading blocked. Set GRIDBOT_LIVE_TRADING=true to enable.")
 
     def get_current_price(self, symbol: str) -> float:
+        symbol = self._normalize_symbol(symbol)
         ticker = _retry(lambda: self.exchange.fetch_ticker(symbol))
         return float(ticker["last"])
 
