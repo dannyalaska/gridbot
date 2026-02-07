@@ -90,6 +90,20 @@ class ExchangeConnector:
             return list(self.paper_orders)
         return self.exchange.fetch_open_orders(symbol=symbol)
 
+    def get_order(self, order_id: str, symbol: Optional[str] = None) -> Optional[Order]:
+        """Best-effort fetch for a single order.
+
+        In live/sandbox, an order disappearing from `fetch_open_orders` does *not* necessarily mean it filled.
+        It could have been rejected/cancelled/expired or we could have missed it due to transient API issues.
+        """
+        if self.dry_run:
+            # Paper orders have no authoritative status.
+            return None
+        try:
+            return self.exchange.fetch_order(order_id, symbol=symbol)
+        except Exception:  # noqa: BLE001
+            return None
+
     def cancel_order(self, order_id: str, symbol: Optional[str] = None) -> None:
         if self.dry_run:
             logging.info("Dry run cancel %s", order_id)
@@ -136,6 +150,20 @@ class SimulationExchange:
         if symbol:
             return [o for o in self.open_orders if o.get("symbol") == symbol]
         return list(self.open_orders)
+
+    def get_order(self, order_id: str, symbol: Optional[str] = None) -> Optional[Order]:
+        """Best-effort fetch for a single order.
+
+        In live/sandbox, an order disappearing from `fetch_open_orders` does *not* necessarily mean it filled.
+        It could have been rejected/cancelled/expired or we could have missed it due to transient API issues.
+        """
+        if self.dry_run:
+            # Paper orders have no authoritative status.
+            return None
+        try:
+            return self.exchange.fetch_order(order_id, symbol=symbol)
+        except Exception:  # noqa: BLE001
+            return None
 
     def cancel_order(self, order_id: str, symbol: Optional[str] = None) -> None:
         self.open_orders = [o for o in self.open_orders if o["id"] != order_id]

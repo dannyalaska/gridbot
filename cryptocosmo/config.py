@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import yaml
 
@@ -118,7 +118,7 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
-def _optional(data: Dict[str, Any] | None, key: str, default: Any) -> Any:
+def _optional(data: Optional[Dict[str, Any]], key: str, default: Any) -> Any:
     if not data:
         return default
     return data.get(key, default)

@@ -1,7 +1,7 @@
 import logging
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Dict
+from typing import Deque, Dict, Optional
 
 from .config import AppConfig
 
@@ -14,16 +14,16 @@ class RiskState:
     crash_pct: float
     paused: bool
     allow_new_buys: bool
-    reason: str | None = None
-    start_equity: float | None = None
-    max_equity: float | None = None
+    reason: Optional[str] = None
+    start_equity: Optional[float] = None
+    max_equity: Optional[float] = None
 
 
 class RiskGuard:
     def __init__(self, cfg: AppConfig):
         self.cfg = cfg
-        self.start_equity: float | None = None
-        self.max_equity: float | None = None
+        self.start_equity: Optional[float] = None
+        self.max_equity: Optional[float] = None
         self.recent_prices: Deque[float] = deque(maxlen=cfg.risk.crash_window_ticks)
         self.paused = False
 
@@ -73,7 +73,7 @@ class RiskGuard:
             max_equity=self.max_equity,
         )
 
-    def restore_state(self, start_equity: float | None, max_equity: float | None) -> None:
+    def restore_state(self, start_equity: Optional[float], max_equity: Optional[float]) -> None:
         if start_equity is not None:
             self.start_equity = float(start_equity)
         if max_equity is not None:

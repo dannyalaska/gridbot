@@ -255,9 +255,13 @@ class BotRunner:
                 self.health.record_error()
                 logging.error("Error on tick %d: %s", tick, exc, extra={"tick": tick, "action": "tick_error"})
 
+            # Pace the loop.
+            # Without this, simulation/sandbox/live modes will hammer ccxt, spam logs/DB, and burn CPU.
             tick_latency = time.perf_counter() - tick_started
             with self.lock:
                 self.last_tick_latency = tick_latency
+            sleep_for = max(0.0, float(self.cfg.tick_seconds) - tick_latency)
+            time.sleep(sleep_for)
 
             if self.stop_event.wait(self.cfg.tick_seconds):
                 break
