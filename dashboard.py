@@ -15,7 +15,7 @@ from cryptocosmo.metrics import render_prometheus
 app = FastAPI(title="CryptoCosmo Control Room")
 static_dir = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
-config = load_config("config.yaml")
+config = load_config(os.getenv("GRIDBOT_CONFIG", "config.yaml"))
 runner = BotRunner(config)
 AUTO_START = os.getenv("GRIDBOT_AUTOSTART", "").strip().lower() in {"1", "true", "yes", "on"}
 if AUTO_START:
@@ -80,6 +80,7 @@ async def index() -> HTMLResponse:
                 </div>
             </header>
             <div class="notice" id="notice" style="display:none;"></div>
+            <div id="pauseBanner">⚠ Risk Council voted to PAUSE — trading halted. Reason: <span id="pauseReason"></span></div>
 
             <div class="panel" style="margin-top:18px;">
                 <div class="controls">
@@ -140,25 +141,53 @@ async def index() -> HTMLResponse:
                     <div id="balances" style="color:var(--muted);">-</div>
                     <div id="sweeper" style="color:var(--muted);">-</div>
                 </div>
-                <div class="panel stat">
-                    <h3>Risk Council</h3>
-                    <div class="value" id="risk">-</div>
-                    <div id="drawdown" style="color:var(--muted);">-</div>
+                <div class="panel" style="grid-column: span 2;">
+                    <div class="panel-head">
+                        <h3>Risk Council</h3>
+                        <span class="badge subtle" id="risk">-</span>
+                    </div>
+                    <div class="agent-council">
+                        <div class="agent-card" id="agentRiskGuard">
+                            <span class="agent-icon">🛡</span>
+                            <span class="agent-name">RiskGuard</span>
+                            <span class="agent-reason" id="agentRiskGuardReason"></span>
+                            <span class="agent-vote allow" id="agentRiskGuardVote">—</span>
+                        </div>
+                        <div class="agent-card" id="agentLLM">
+                            <span class="agent-icon">🤖</span>
+                            <span class="agent-name">LLM Risk Agent</span>
+                            <span class="agent-reason" id="agentLLMReason"></span>
+                            <span class="agent-vote allow" id="agentLLMVote">—</span>
+                        </div>
+                        <div class="agent-card" id="agentManager">
+                            <span class="agent-icon">📊</span>
+                            <span class="agent-name">Manager</span>
+                            <span class="agent-reason" id="agentManagerReason"></span>
+                            <span class="agent-vote allow" id="agentManagerVote">—</span>
+                        </div>
+                    </div>
+                    <div style="margin-top:8px;font-size:11px;color:var(--muted);" id="drawdown">-</div>
                 </div>
                 <div class="panel stat">
                     <h3>Grid Window</h3>
                     <div class="value" id="grid">-</div>
-                    <div id="gridMeta" style="color:var(--muted);">-</div>
+                    <div id="gridMeta" class="sub">-</div>
                 </div>
                 <div class="panel stat">
-                    <h3>Sentiment</h3>
+                    <h3>Market Sentiment</h3>
                     <div class="value" id="sentiment">-</div>
-                    <div id="sentimentDetail" style="color:var(--muted);">-</div>
+                    <div class="fg-meter">
+                        <div class="fg-bar-track">
+                            <div class="fg-bar-thumb" id="fgThumb" style="left:50%"></div>
+                        </div>
+                        <div class="fg-labels"><span>Fear</span><span>Neutral</span><span>Greed</span></div>
+                    </div>
+                    <div id="sentimentDetail" class="sub">-</div>
                 </div>
                 <div class="panel stat">
                     <h3>Health</h3>
                     <div class="value" id="health">-</div>
-                    <div id="healthDetail" style="color:var(--muted);">-</div>
+                    <div id="healthDetail" class="sub">-</div>
                 </div>
             </div>
 
@@ -370,24 +399,34 @@ async def index() -> HTMLResponse:
                 ctx.stroke();
 
                 const xStep = history.length > 1 ? width / (history.length - 1) : width;
-                function drawSeries(series, color) {
+                function drawSeries(series, color, fill) {
+                    if (!series.length) return;
+                    const pts = series.map((value, index) => ({
+                        x: index * xStep,
+                        y: height - ((value - yMin) / (yMax - yMin)) * height,
+                    }));
+                    if (fill) {
+                        const grad = ctx.createLinearGradient(0, 0, 0, height);
+                        grad.addColorStop(0, color.replace(')', ', 0.22)').replace('rgb', 'rgba'));
+                        grad.addColorStop(1, color.replace(')', ', 0)').replace('rgb', 'rgba'));
+                        ctx.fillStyle = fill === true ? color + '22' : fill;
+                        ctx.beginPath();
+                        ctx.moveTo(pts[0].x, height);
+                        pts.forEach(p => ctx.lineTo(p.x, p.y));
+                        ctx.lineTo(pts[pts.length-1].x, height);
+                        ctx.closePath();
+                        ctx.fill();
+                    }
                     ctx.strokeStyle = color;
                     ctx.lineWidth = 2;
+                    ctx.lineJoin = 'round';
                     ctx.beginPath();
-                    series.forEach((value, index) => {
-                        const x = index * xStep;
-                        const y = height - ((value - yMin) / (yMax - yMin)) * height;
-                        if (index === 0) {
-                            ctx.moveTo(x, y);
-                        } else {
-                            ctx.lineTo(x, y);
-                        }
-                    });
+                    pts.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
                     ctx.stroke();
                 }
 
-                drawSeries(priceSeries, palette.price);
-                drawSeries(equitySeries, palette.equity);
+                drawSeries(priceSeries, palette.price, true);
+                drawSeries(equitySeries, palette.equity, true);
             }
 
             function drawGridMap(state) {
@@ -551,17 +590,69 @@ async def index() -> HTMLResponse:
                 document.getElementById('equity').innerText = data.equity ? data.equity.toFixed(2) : '-';
                 document.getElementById('balances').innerText = `Base: ${Number(data.balances?.base || 0).toFixed(4)} · Quote: ${Number(data.balances?.quote || 0).toFixed(2)}`;
                 document.getElementById('sweeper').innerText = `Cosmetics fund: ${Number(data.sweeper?.fund_balance || 0).toFixed(2)}`;
-                document.getElementById('risk').innerText = data.risk?.paused ? 'Paused' : 'Active';
-                document.getElementById('risk').className = data.risk?.paused ? 'value warn' : 'value';
-                const reason = data.risk?.reason ? ` · ${data.risk.reason}` : '';
-                document.getElementById('drawdown').innerText = `Drawdown: ${Number(data.risk?.drawdown_pct || 0).toFixed(2)}%${reason}`;
+                // Risk Council badge
+                const riskBadge = document.getElementById('risk');
+                riskBadge.innerText = data.risk?.paused ? '⚠ Paused' : '✓ Active';
+                riskBadge.className = data.risk?.paused ? 'badge warn' : 'badge ok';
+
+                // Pause banner
+                const pauseBanner = document.getElementById('pauseBanner');
+                const pauseReason = document.getElementById('pauseReason');
+                if (data.risk?.paused) {
+                    pauseBanner.style.display = 'block';
+                    if (pauseReason) pauseReason.innerText = data.risk?.reason || 'Unknown';
+                } else {
+                    pauseBanner.style.display = 'none';
+                }
+
+                // Agent cards — derive individual agent state from combined risk data
+                const riskPaused = !!data.risk?.paused;
+                const reason = data.risk?.reason || '';
+                const riskGuardFired = riskPaused && (reason.includes('loss') || reason.includes('drawdown') || reason.includes('crash') || reason.includes('risk guard'));
+                const llmFired = riskPaused && (reason.includes('llm') || reason.includes('news risk'));
+                const managerFired = riskPaused && reason.includes('manager');
+
+                function setAgent(id, voteId, reasonId, fired, reasonText) {
+                    const card = document.getElementById(id);
+                    const vote = document.getElementById(voteId);
+                    const rsn  = document.getElementById(reasonId);
+                    if (!card || !vote) return;
+                    if (fired) {
+                        card.className = 'agent-card vetoed';
+                        vote.className = 'agent-vote veto';
+                        vote.innerText = 'VETO';
+                        if (rsn) rsn.innerText = reasonText;
+                    } else if (data.running) {
+                        card.className = 'agent-card voting';
+                        vote.className = 'agent-vote allow';
+                        vote.innerText = '✓ Allow';
+                        if (rsn) rsn.innerText = '';
+                    } else {
+                        card.className = 'agent-card';
+                        vote.className = 'agent-vote';
+                        vote.innerText = '—';
+                        if (rsn) rsn.innerText = '';
+                    }
+                }
+                setAgent('agentRiskGuard','agentRiskGuardVote','agentRiskGuardReason', riskGuardFired, reason);
+                setAgent('agentLLM','agentLLMVote','agentLLMReason', llmFired, reason);
+                setAgent('agentManager','agentManagerVote','agentManagerReason', managerFired || (riskPaused && !riskGuardFired && !llmFired), reason);
+
+                document.getElementById('drawdown').innerText = `Drawdown ${Number(data.risk?.drawdown_pct || 0).toFixed(2)}% · Loss ${Number(data.risk?.loss_pct || 0).toFixed(2)}% · Crash ${Number(data.risk?.crash_pct || 0).toFixed(2)}%`;
+
                 document.getElementById('grid').innerText = `${Number(data.grid?.lower || 0).toFixed(2)} – ${Number(data.grid?.upper || 0).toFixed(2)}`;
                 document.getElementById('gridMeta').innerText = `Center ${Number(data.grid?.center || 0).toFixed(2)} · Spacing ${Number(data.grid?.spacing || 0).toFixed(2)} · MaxExp ${Number(data.grid?.max_exposure || 0).toFixed(2)}`;
-                document.getElementById('sentiment').innerText = `${data.sentiment?.label || '-'}`;
-                document.getElementById('sentimentDetail').innerText = `Score ${Number(data.sentiment?.score || 0).toFixed(2)} · News ${data.sentiment?.news_risk || '-'}`;
+
+                // Sentiment + F&G meter
+                const fgVal = data.sentiment?.raw_value != null ? data.sentiment.raw_value : 50;
+                document.getElementById('sentiment').innerText = `${data.sentiment?.label || 'Neutral'} · ${fgVal}/100`;
+                const thumb = document.getElementById('fgThumb');
+                if (thumb) thumb.style.left = `${fgVal}%`;
+                document.getElementById('sentimentDetail').innerText = `Score ${Number(data.sentiment?.score || 0).toFixed(3)} · News risk: ${data.sentiment?.news_risk || 'low'}`;
+
                 document.getElementById('health').innerText = data.health?.healthy ? 'Healthy' : 'Attention';
                 document.getElementById('health').className = data.health?.healthy ? 'value ok' : 'value warn';
-                document.getElementById('healthDetail').innerText = `Errors: ${data.health?.error_streak || 0}`;
+                document.getElementById('healthDetail').innerText = `Error streak: ${data.health?.error_streak || 0}`;
                 document.getElementById('symbolLabel').innerText = `${data.symbol} · Tick ${data.tick}`;
 
                 updateAllocation(data);
@@ -585,7 +676,19 @@ async def index() -> HTMLResponse:
                 });
 
                 const logFeed = document.getElementById('logFeed');
-                logFeed.innerHTML = (data.logs || []).slice(-50).map(line => `<div>${line}</div>`).join('');
+                const atBottom = logFeed.scrollHeight - logFeed.scrollTop <= logFeed.clientHeight + 20;
+                logFeed.innerHTML = (data.logs || []).slice(-60).map(line => {
+                    const l = line.toLowerCase();
+                    let cls = 'log-default';
+                    if (l.includes('fill')) cls = 'log-fill';
+                    else if (l.includes('place_buy') || l.includes('seed sell')) cls = 'log-buy';
+                    else if (l.includes('place_sell') || l.includes('sell fill')) cls = 'log-sell';
+                    else if (l.includes('pause') || l.includes('veto') || l.includes('halted')) cls = 'log-pause';
+                    else if (l.includes('sentiment') || l.includes('fear') || l.includes('greed')) cls = 'log-sentiment';
+                    else if (l.includes('error') || l.includes('fail')) cls = 'log-error';
+                    return `<div class="log-line ${cls}">${line.replace(/</g,'&lt;')}</div>`;
+                }).join('');
+                if (atBottom) logFeed.scrollTop = logFeed.scrollHeight;
 
                 // Seed control values
                 document.getElementById('mode').value = data.mode || 'simulation';

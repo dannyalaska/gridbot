@@ -1,0 +1,69 @@
+mode: simulation
+symbol: BTC/USDT
+tick_seconds: 1        # fast — visible activity immediately
+max_ticks: 0           # unlimited — runs until you stop it
+
+log_level: INFO
+
+grid:
+  center_price: 43000
+  spacing: 150
+  levels: 4
+  order_size: 0.001
+  max_exposure_quote: 500
+  lower_bound: 41000
+  upper_bound: 45000
+
+risk:
+  daily_loss_limit_pct: 1.5   # fires faster so demo can show a pause
+  max_drawdown_pct: 3.0
+  crash_drop_pct: 0.8
+  crash_window_ticks: 3
+  cancel_open_orders_on_pause: true
+  restore_state: false         # fresh start every time
+
+performance:
+  adjust_interval_ticks: 30   # grid recenters more visibly
+  center_shift_pct_limit: 0.5
+  spacing_min: 75
+  spacing_max: 400
+  order_size_min: 0.0005
+  order_size_max: 0.002
+
+simulation:
+  starting_base: 0.0
+  starting_quote: 1000.0
+  drift: 0.0001
+  volatility: 0.006   # 2x normal — price moves more, fills happen faster
+  fee_rate: 0.0004
+  seed: 7             # seed 7 produces early fills and a drawdown event
+
+sentiment:
+  weight: 0.15
+
+llm_risk:
+  enabled: true              # AI layer ON — sentiment actually blocks trades
+  max_daily_loss_pct: 1.5
+  max_drawdown_pct: 3.0
+  max_crash_pct: 0.8
+  block_on_news_risk: true   # Fear & Greed affects decisions visibly
+
+health:
+  max_stale_price_secs: 30
+  max_error_streak: 3
+
+profit_sweeper:
+  cosmetics_goal: 50.0
+  sweep_interval_ticks: 100
+
+exchange:
+  name: binance
+  sandbox: true
+  dry_run: true
+  api_key_env: BINANCE_SANDBOX_API_KEY
+  api_secret_env: BINANCE_SANDBOX_API_SECRET
+
+persistence:
+  enabled: true
+  db_path: data/state.demo.db
+  restore_last_grid: false

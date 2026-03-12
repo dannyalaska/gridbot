@@ -16,6 +16,7 @@ from .profit_sweeper import ProfitSweeper
 from .risk_council import RiskCouncil
 from .sentiment_scout import SentimentScout
 from .simulator import Simulator
+from .telegram_alerts import TelegramAlerter
 
 
 @dataclass
@@ -64,7 +65,9 @@ class BotRunner:
         self._seeded_from_live = False
         self.start_time: Optional[float] = None
         self.last_tick_latency: Optional[float] = None
+        self._prev_paused: bool = False
 
+        self.alerter = TelegramAlerter()
         self.status = BotStatus(mode=cfg.mode, symbol=cfg.symbol)
         self.history = deque(maxlen=400)
 
@@ -80,11 +83,13 @@ class BotRunner:
         if self.thread and self.thread.is_alive():
             return
         self._seeded_from_live = False
+        self._prev_paused = False
         self.stop_event.clear()
         self._build_components()
         self.start_time = time.time()
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
+        self.alerter.alert_started(self.cfg.symbol, self.cfg.mode)
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -95,6 +100,7 @@ class BotRunner:
                 self.persistence.close()
             except Exception:  # noqa: BLE001
                 pass
+        self.alerter.alert_stopped(self.cfg.symbol)
         with self.lock:
             self.status.running = False
 
@@ -217,6 +223,18 @@ class BotRunner:
                 self.sweeper.maybe_sweep(tick, risk_state.equity)
                 self.health.reset_errors()
 
+                # Fire Telegram alerts on pause state transitions only
+                if risk_state.paused and not self._prev_paused:
+                    self.alerter.alert_risk_paused(
+                        symbol=self.cfg.symbol,
+                        reason=risk_state.reason,
+                        equity=risk_state.equity,
+                        drawdown_pct=risk_state.drawdown_pct,
+                    )
+                elif not risk_state.paused and self._prev_paused:
+                    self.alerter.alert_risk_resumed(self.cfg.symbol, risk_state.equity)
+                self._prev_paused = risk_state.paused
+
                 if risk_state.paused and self.cfg.risk.cancel_open_orders_on_pause:
                     self.grid_trader.cancel_all(self.connector)
                     open_orders = []
@@ -267,6 +285,10 @@ class BotRunner:
                     logging.warning(
                         "Health monitor paused trading loop",
                         extra={"tick": tick, "action": "health_pause"},
+                    )
+                    self.alerter.alert_health_failure(
+                        symbol=self.cfg.symbol,
+                        error_streak=self.health.error_streak,
                     )
                     break
             except Exception as exc:  # noqa: BLE001
@@ -331,6 +353,7 @@ class BotRunner:
                 "score": sentiment_snapshot.score,
                 "label": sentiment_snapshot.label,
                 "news_risk": sentiment_snapshot.news_risk,
+                "raw_value": sentiment_snapshot.raw_value,
             }
             self.status.sweeper = {"fund_balance": self.sweeper.fund_balance}
             self.status.logs = self.log_handler.get_logs()
