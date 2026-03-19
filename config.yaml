@@ -1,4 +1,4 @@
-mode: simulation  # simulation | sandbox
+mode: simulation  # simulation | sandbox | live
 symbol: BTC/USDT
 tick_seconds: 5
 max_ticks: 200
@@ -19,6 +19,7 @@ risk:
   crash_drop_pct: 1.0
   crash_window_ticks: 3
   cancel_open_orders_on_pause: true
+  restore_state: true
 
 performance:
   adjust_interval_ticks: 60
@@ -39,6 +40,13 @@ simulation:
 sentiment:
   weight: 0.15
 
+llm_risk:
+  enabled: false
+  max_daily_loss_pct: 1.0
+  max_drawdown_pct: 3.0
+  max_crash_pct: 0.8
+  block_on_news_risk: true
+
 health:
   max_stale_price_secs: 30
   max_error_streak: 3
@@ -58,3 +66,24 @@ persistence:
   enabled: true
   db_path: data/state.db
   restore_last_grid: true
+
+indicators:
+  # ATR-based dynamic spacing: spacing = ATR(atr_period) * atr_spacing_multiplier
+  atr_period: 14
+  atr_spacing_multiplier: 0.5        # 0.5x ATR per grid gap
+
+  # RSI thresholds: pause new buys above rsi_overbought, scale up below rsi_oversold
+  rsi_period: 14
+  rsi_overbought: 70.0
+  rsi_oversold: 30.0
+
+  # Bollinger Band dynamic bounds: replaces static lower_bound/upper_bound when enabled
+  bb_period: 20
+  bb_std: 2.0
+  use_bollinger_bounds: true
+
+  # Volatility-adjusted order sizing:
+  #   base_order_quote = max_exposure_quote * order_fraction
+  #   then scaled by (typical_atr_pct / current_atr_pct), clamped [0.5, 1.5]
+  order_fraction: 0.10               # 10% of max_exposure per order (matches current default)
+  typical_atr_pct: 0.005             # 0.5% is considered "normal" per-candle volatility

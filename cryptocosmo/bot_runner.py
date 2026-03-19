@@ -1,20 +1,22 @@
 import logging
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from .config import AppConfig
-from .exchange import ExchangeConnector
+from .exchange import ExchangeConnector, PaperExchange, PublicPriceFeed
 from .grid_trader import GridTrader
 from .health_monitor import HealthMonitor
 from .logging_utils import InMemoryLogHandler, configure_logging
 from .performance_analyst import PerformanceAnalyst
 from .persistence import Persistence
 from .profit_sweeper import ProfitSweeper
-from .risk_guard import RiskGuard
+from .risk_council import RiskCouncil
 from .sentiment_scout import SentimentScout
 from .simulator import Simulator
+from .telegram_alerts import TelegramAlerter
 
 
 @dataclass
@@ -50,20 +52,24 @@ class BotRunner:
         self._attach_log_handler()
 
         self.grid_trader: Optional[GridTrader] = None
-        self.risk_guard: Optional[RiskGuard] = None
+        self.risk_council: Optional[RiskCouncil] = None
         self.analyst: Optional[PerformanceAnalyst] = None
         self.sentiment: Optional[SentimentScout] = None
         self.health: Optional[HealthMonitor] = None
         self.sweeper: Optional[ProfitSweeper] = None
         self.simulator: Optional[Simulator] = None
         self.connector = None
+        self.pricefeed = None
         self.persistence: Optional[Persistence] = None
         self.run_id: Optional[int] = None
         self._seeded_from_live = False
         self.start_time: Optional[float] = None
         self.last_tick_latency: Optional[float] = None
+        self._prev_paused: bool = False
 
+        self.alerter = TelegramAlerter()
         self.status = BotStatus(mode=cfg.mode, symbol=cfg.symbol)
+        self.history = deque(maxlen=400)
 
     def _attach_log_handler(self) -> None:
         configure_logging(
@@ -77,22 +83,30 @@ class BotRunner:
         if self.thread and self.thread.is_alive():
             return
         self._seeded_from_live = False
+        self._prev_paused = False
         self.stop_event.clear()
         self._build_components()
         self.start_time = time.time()
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
+        self.alerter.alert_started(self.cfg.symbol, self.cfg.mode)
 
     def stop(self) -> None:
         self.stop_event.set()
         if self.thread:
             self.thread.join(timeout=2)
+        if self.persistence:
+            try:
+                self.persistence.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self.alerter.alert_stopped(self.cfg.symbol)
         with self.lock:
             self.status.running = False
 
     def _build_components(self) -> None:
         self.grid_trader = GridTrader(self.cfg)
-        self.risk_guard = RiskGuard(self.cfg)
+        self.risk_council = RiskCouncil(self.cfg)
         self.analyst = PerformanceAnalyst(self.cfg)
         self.sentiment = SentimentScout()
         self.health = HealthMonitor(self.cfg)
@@ -101,8 +115,14 @@ class BotRunner:
         if self.cfg.mode == "simulation":
             self.simulator = Simulator(self.cfg)
             self.connector = self.simulator.exchange
-        elif self.cfg.mode == "sandbox":
+            self.pricefeed = None
+        elif self.cfg.mode == "paper":
             self.simulator = None
+            self.pricefeed = PublicPriceFeed(self.cfg)
+            self.connector = PaperExchange(starting_base=self.cfg.simulation.starting_base, starting_quote=self.cfg.simulation.starting_quote, fee_rate=self.cfg.simulation.fee_rate)
+        elif self.cfg.mode in ("sandbox", "live"):
+            self.simulator = None
+            self.pricefeed = None
             self.connector = ExchangeConnector(self.cfg)
         else:
             raise ValueError(f"Unsupported mode {self.cfg.mode}")
@@ -123,6 +143,14 @@ class BotRunner:
                 self.cfg.grid.upper_bound = grid.get("upper", self.cfg.grid.upper_bound)
                 self.cfg.grid.max_exposure_quote = grid.get("max_exposure", self.cfg.grid.max_exposure_quote)
                 self.grid_trader.update_grid(self.cfg.grid.center_price, self.cfg.grid.spacing)
+
+        if self.persistence and self.cfg.risk.restore_state and self.risk_council:
+            restored_risk = self.persistence.last_run_risk(self.cfg.mode, self.cfg.symbol)
+            if restored_risk:
+                self.risk_council.restore_state(
+                    start_equity=restored_risk.get("start_equity"),
+                    max_equity=restored_risk.get("max_equity"),
+                )
 
     def _extract_balances(self, raw_balances: Dict[str, Dict[str, float]]) -> Dict[str, float]:
         base, quote = self.cfg.symbol.split("/")
@@ -157,6 +185,12 @@ class BotRunner:
                     balances = sim_result.balances
                     fills = sim_result.fills
                     open_orders = self.connector.get_open_orders(symbol=self.cfg.symbol)
+                elif self.cfg.mode == "paper":
+                    price = self.pricefeed.get_current_price(self.cfg.symbol)
+                    self.connector.set_price(price)
+                    fills = self.connector.consume_fills()
+                    balances = self.connector.get_balances()
+                    open_orders = self.connector.get_open_orders(symbol=self.cfg.symbol)
                 else:
                     price = self.connector.get_current_price(self.cfg.symbol)
                     raw_balances = self.connector.get_balances()
@@ -169,19 +203,41 @@ class BotRunner:
                     self._seeded_from_live = True
 
                 self.health.record_price()
-                risk_state = self.risk_guard.evaluate(price, balances)
+                health_ok = self.health.healthy()
                 if tick % 12 == 0:
                     sentiment_snapshot = self.sentiment.fetch()
+                # Analyst runs first: updates price buffer (needed for RSI) and adjusts grid.
                 self.analyst.maybe_adjust(tick, price, self.grid_trader, sentiment_score=sentiment_snapshot.score)
+                rsi = self.analyst.current_rsi()
+                risk_state = self.risk_council.evaluate(
+                    price=price,
+                    balances=balances,
+                    sentiment=sentiment_snapshot,
+                    health_ok=health_ok,
+                    rsi=rsi,
+                )
                 self.grid_trader.sync(
                     connector=self.connector,
                     price=price,
                     balances=balances,
                     open_orders=open_orders,
                     allow_new_buys=risk_state.allow_new_buys,
+                    order_size_multiplier=risk_state.order_size_multiplier,
                 )
                 self.sweeper.maybe_sweep(tick, risk_state.equity)
                 self.health.reset_errors()
+
+                # Fire Telegram alerts on pause state transitions only
+                if risk_state.paused and not self._prev_paused:
+                    self.alerter.alert_risk_paused(
+                        symbol=self.cfg.symbol,
+                        reason=risk_state.reason,
+                        equity=risk_state.equity,
+                        drawdown_pct=risk_state.drawdown_pct,
+                    )
+                elif not risk_state.paused and self._prev_paused:
+                    self.alerter.alert_risk_resumed(self.cfg.symbol, risk_state.equity)
+                self._prev_paused = risk_state.paused
 
                 if risk_state.paused and self.cfg.risk.cancel_open_orders_on_pause:
                     self.grid_trader.cancel_all(self.connector)
@@ -207,10 +263,17 @@ class BotRunner:
                     balances=balances,
                     open_orders=open_orders,
                     risk_state=risk_state,
+                    health_ok=health_ok,
                     sentiment_snapshot=sentiment_snapshot,
+                    rsi=rsi,
                 )
 
                 if self.persistence and self.run_id:
+                    self.persistence.update_risk(
+                        run_id=self.run_id,
+                        start_equity=risk_state.start_equity,
+                        max_equity=risk_state.max_equity,
+                    )
                     self.persistence.record_snapshot(
                         run_id=self.run_id,
                         tick=tick,
@@ -220,25 +283,38 @@ class BotRunner:
                         quote=balances.get("quote", 0.0),
                         paused=risk_state.paused,
                         drawdown=risk_state.drawdown_pct,
-                        healthy=self.health.healthy(),
+                        healthy=health_ok,
                     )
 
-                if not self.health.healthy():
+                if not health_ok:
                     logging.warning(
                         "Health monitor paused trading loop",
                         extra={"tick": tick, "action": "health_pause"},
+                    )
+                    self.alerter.alert_health_failure(
+                        symbol=self.cfg.symbol,
+                        error_streak=self.health.error_streak,
                     )
                     break
             except Exception as exc:  # noqa: BLE001
                 self.health.record_error()
                 logging.error("Error on tick %d: %s", tick, exc, extra={"tick": tick, "action": "tick_error"})
 
+            # Pace the loop.
+            # Without this, simulation/sandbox/live modes will hammer ccxt, spam logs/DB, and burn CPU.
             tick_latency = time.perf_counter() - tick_started
             with self.lock:
                 self.last_tick_latency = tick_latency
+            sleep_for = max(0.0, float(self.cfg.tick_seconds) - tick_latency)
+            time.sleep(sleep_for)
 
             if self.stop_event.wait(self.cfg.tick_seconds):
                 break
+        if self.persistence:
+            try:
+                self.persistence.close()
+            except Exception:  # noqa: BLE001
+                pass
         with self.lock:
             self.status.running = False
 
@@ -249,7 +325,9 @@ class BotRunner:
         balances: Dict[str, float],
         open_orders: List[dict],
         risk_state,
+        health_ok: bool,
         sentiment_snapshot,
+        rsi: Optional[float] = None,
     ) -> None:
         with self.lock:
             self.status.tick = tick
@@ -260,11 +338,15 @@ class BotRunner:
             self.status.risk = {
                 "paused": risk_state.paused,
                 "drawdown_pct": risk_state.drawdown_pct,
+                "loss_pct": risk_state.loss_pct,
+                "crash_pct": risk_state.crash_pct,
                 "allow_new_buys": risk_state.allow_new_buys,
                 "reason": risk_state.reason,
+                "rsi": rsi,
+                "order_size_multiplier": risk_state.order_size_multiplier,
             }
             self.status.health = {
-                "healthy": self.health.healthy(),
+                "healthy": health_ok,
                 "error_streak": self.health.error_streak,
             }
             self.status.grid = {
@@ -279,6 +361,7 @@ class BotRunner:
                 "score": sentiment_snapshot.score,
                 "label": sentiment_snapshot.label,
                 "news_risk": sentiment_snapshot.news_risk,
+                "raw_value": sentiment_snapshot.raw_value,
             }
             self.status.sweeper = {"fund_balance": self.sweeper.fund_balance}
             self.status.logs = self.log_handler.get_logs()
@@ -296,10 +379,29 @@ class BotRunner:
                         "max_exposure": self.cfg.grid.max_exposure_quote,
                     },
                 )
+            self.history.append(
+                {
+                    "tick": tick,
+                    "price": price,
+                    "equity": risk_state.equity,
+                    "base": balances.get("base", 0.0),
+                    "quote": balances.get("quote", 0.0),
+                    "paused": risk_state.paused,
+                    "drawdown": risk_state.drawdown_pct,
+                    "healthy": health_ok,
+                    "timestamp": time.time(),
+                }
+            )
 
     def get_status(self) -> BotStatus:
         with self.lock:
             return self.status
+
+    def get_history(self, limit: int = 300) -> List[dict]:
+        with self.lock:
+            if self.persistence and self.run_id:
+                return self.persistence.recent_snapshots(self.run_id, limit=limit)
+            return list(self.history)[-limit:]
 
     def get_metrics(self) -> Dict[str, float]:
         with self.lock:
@@ -312,6 +414,8 @@ class BotRunner:
                 "price": float(status.price),
                 "equity": float(status.equity),
                 "drawdown_pct": float(status.risk.get("drawdown_pct", 0.0)),
+                "loss_pct": float(status.risk.get("loss_pct", 0.0)),
+                "crash_pct": float(status.risk.get("crash_pct", 0.0)),
                 "risk_paused": 1.0 if status.risk.get("paused") else 0.0,
                 "health_healthy": 1.0 if status.health.get("healthy") else 0.0,
                 "error_streak": float(status.health.get("error_streak", 0.0)),

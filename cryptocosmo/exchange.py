@@ -2,14 +2,78 @@ import logging
 import os
 import time
 import uuid
+from collections import deque
 from typing import Dict, List, Optional
 
 import ccxt
+
+import random
+
+# Retryable ccxt exception types (best-effort; ccxt raises these for transient issues)
+RETRYABLE_CCXT_EXC = (
+    getattr(ccxt, 'NetworkError', Exception),
+    getattr(ccxt, 'RequestTimeout', Exception),
+    getattr(ccxt, 'DDoSProtection', Exception),
+    getattr(ccxt, 'RateLimitExceeded', Exception),
+    getattr(ccxt, 'ExchangeNotAvailable', Exception),
+)
+
+
+def _retry(fn, *, tries: int = 3, base_delay: float = 0.5, max_delay: float = 6.0):
+    last = None
+    for attempt in range(tries):
+        try:
+            return fn()
+        except RETRYABLE_CCXT_EXC as exc:  # noqa: BLE001
+            last = exc
+            delay = min(max_delay, base_delay * (2 ** attempt))
+            delay = delay + random.random() * 0.25
+            time.sleep(delay)
+    if last:
+        raise last
 
 from .config import AppConfig
 
 
 Order = Dict[str, object]
+
+
+class PublicPriceFeed:
+    """Public-only ccxt client used for paper trading.
+
+    - No API keys required.
+    - Only uses public endpoints (ticker).
+    """
+
+    def __init__(self, cfg: AppConfig):
+        # Binance public endpoints may return HTTP 451 in some locations.
+        # For paper trading we only need a liquid public price feed, so default to Coinbase when exchange=name is binance.
+        name = (cfg.exchange.name or "").strip().lower()
+        if name == 'binance':
+            name = 'coinbase'
+        if not hasattr(ccxt, name):
+            raise ValueError(f"Exchange {name} is not supported by ccxt")
+        self.exchange = getattr(ccxt, name)({"enableRateLimit": True})
+        try:
+            self.exchange.set_sandbox_mode(False)
+        except Exception:  # noqa: BLE001
+            pass
+    def _normalize_symbol(self, symbol: str) -> str:
+        if symbol.endswith("/USDT"):
+            return symbol.replace("/USDT", "/USD")
+        return symbol
+
+
+    def get_current_price(self, symbol: str) -> float:
+        symbol = self._normalize_symbol(symbol)
+        ticker = _retry(lambda: self.exchange.fetch_ticker(symbol))
+        return float(ticker["last"])
+
+    def fetch_ohlcv(self, symbol: str, timeframe: str = "1m", limit: int = 50) -> List[List[float]]:
+        """Fetch OHLCV candles: [[timestamp, open, high, low, close, volume], ...]"""
+        sym = self._normalize_symbol(symbol)
+        result = _retry(lambda: self.exchange.fetch_ohlcv(sym, timeframe=timeframe, limit=limit))
+        return result or []
 
 
 class ExchangeConnector:
@@ -22,7 +86,7 @@ class ExchangeConnector:
         self.dry_run = cfg.exchange.dry_run
         self.exchange = None
         self.paper_orders: List[Order] = []
-        if cfg.mode == "sandbox":
+        if cfg.mode in ("sandbox", "live"):
             self._init_exchange()
 
     def _init_exchange(self) -> None:
@@ -31,6 +95,14 @@ class ExchangeConnector:
             raise ValueError(f"Exchange {name} is not supported by ccxt")
         api_key = os.getenv(self.cfg.exchange.api_key_env, "")
         api_secret = os.getenv(self.cfg.exchange.api_secret_env, "")
+        if not api_key or not api_secret:
+            raise ValueError(
+                f"Missing API credentials in env {self.cfg.exchange.api_key_env}/{self.cfg.exchange.api_secret_env}"
+            )
+        if self.cfg.mode == "live":
+            self._require_live_confirmation()
+            if self.dry_run:
+                raise RuntimeError("Live mode requires exchange.dry_run=false to place real orders")
         self.exchange = getattr(ccxt, name)(
             {
                 "apiKey": api_key,
@@ -39,20 +111,34 @@ class ExchangeConnector:
             }
         )
         # Use built-in sandbox routing when available (Binance supports this).
-        self.exchange.set_sandbox_mode(self.cfg.exchange.sandbox)
+        sandbox_mode = self.cfg.mode == "sandbox"
+        self.exchange.set_sandbox_mode(sandbox_mode)
         logging.info(
             "Connected to %s (sandbox=%s, dry_run=%s)",
             name,
-            self.cfg.exchange.sandbox,
+            sandbox_mode,
             self.dry_run,
         )
 
+    def _require_live_confirmation(self) -> None:
+        flag = os.getenv("GRIDBOT_LIVE_TRADING", "").strip().lower()
+        if flag not in {"1", "true", "yes", "on"}:
+            raise RuntimeError("Live trading blocked. Set GRIDBOT_LIVE_TRADING=true to enable.")
+
+    def _normalize_symbol(self, symbol: str) -> str:
+        return symbol
+
     def get_current_price(self, symbol: str) -> float:
-        ticker = self.exchange.fetch_ticker(symbol)
+        ticker = _retry(lambda: self.exchange.fetch_ticker(symbol))
         return float(ticker["last"])
 
+    def fetch_ohlcv(self, symbol: str, timeframe: str = "1m", limit: int = 50) -> List[List[float]]:
+        """Fetch OHLCV candles: [[timestamp, open, high, low, close, volume], ...]"""
+        result = _retry(lambda: self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit))
+        return result or []
+
     def get_balances(self) -> Dict[str, Dict[str, float]]:
-        bal = self.exchange.fetch_balance()
+        bal = _retry(lambda: self.exchange.fetch_balance())
         return {"free": bal.get("free", {}), "total": bal.get("total", {})}
 
     def place_limit_buy(self, symbol: str, price: float, amount: float) -> Order:
@@ -61,7 +147,7 @@ class ExchangeConnector:
             self.paper_orders.append(order)
             logging.info("Dry run BUY %s %s @ %s", amount, symbol, price)
             return order
-        return self.exchange.create_limit_buy_order(symbol, amount, price)
+        return _retry(lambda: self.exchange.create_limit_buy_order(symbol, amount, price))
 
     def place_limit_sell(self, symbol: str, price: float, amount: float) -> Order:
         if self.dry_run:
@@ -69,19 +155,19 @@ class ExchangeConnector:
             self.paper_orders.append(order)
             logging.info("Dry run SELL %s %s @ %s", amount, symbol, price)
             return order
-        return self.exchange.create_limit_sell_order(symbol, amount, price)
+        return _retry(lambda: self.exchange.create_limit_sell_order(symbol, amount, price))
 
     def get_open_orders(self, symbol: Optional[str] = None) -> List[Order]:
         if self.dry_run:
             return list(self.paper_orders)
-        return self.exchange.fetch_open_orders(symbol=symbol)
+        return _retry(lambda: self.exchange.fetch_open_orders(symbol=symbol))
 
     def cancel_order(self, order_id: str, symbol: Optional[str] = None) -> None:
         if self.dry_run:
             logging.info("Dry run cancel %s", order_id)
             self.paper_orders = [o for o in self.paper_orders if o.get("id") != order_id]
             return
-        self.exchange.cancel_order(order_id, symbol=symbol)
+        _retry(lambda: self.exchange.cancel_order(order_id, symbol=symbol))
 
 
 class SimulationExchange:
@@ -95,10 +181,28 @@ class SimulationExchange:
         self.balances = {"base": starting_base, "quote": starting_quote}
         self.open_orders: List[Order] = []
         self.fills: List[Dict[str, float]] = []
+        self._price_history: deque = deque(maxlen=200)
 
     def set_price(self, price: float) -> None:
         self.price = price
+        self._price_history.append(price)
         self._fill_orders()
+
+    def fetch_ohlcv(self, symbol: str = None, timeframe: str = "1m", limit: int = 50) -> List[List[float]]:
+        """Synthetic OHLCV built from internal price history.
+
+        Each candle = [index, prev_price, high, low, curr_price, 1.0].
+        Provides real high/low from consecutive tick movement for ATR calculation.
+        """
+        prices = list(self._price_history)
+        if len(prices) < 2:
+            return []
+        candles = []
+        for i in range(1, len(prices)):
+            prev = prices[i - 1]
+            curr = prices[i]
+            candles.append([float(i), prev, max(prev, curr), min(prev, curr), curr, 1.0])
+        return candles[-limit:]
 
     def get_balances(self) -> Dict[str, float]:
         return dict(self.balances)
@@ -158,3 +262,9 @@ class SimulationExchange:
             else:
                 remaining_orders.append(order)
         self.open_orders = remaining_orders
+
+
+class PaperExchange(SimulationExchange):
+    """Paper-trade exchange: local orderbook + local fills + live price feed."""
+
+    pass

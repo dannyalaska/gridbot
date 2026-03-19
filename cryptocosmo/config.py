@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import yaml
 
@@ -23,6 +23,7 @@ class RiskConfig:
     crash_drop_pct: float
     crash_window_ticks: int
     cancel_open_orders_on_pause: bool
+    restore_state: bool
 
 
 @dataclass
@@ -51,6 +52,15 @@ class SentimentConfig:
 
 
 @dataclass
+class LLMRiskConfig:
+    enabled: bool
+    max_daily_loss_pct: float
+    max_drawdown_pct: float
+    max_crash_pct: float
+    block_on_news_risk: bool
+
+
+@dataclass
 class HealthConfig:
     max_stale_price_secs: int
     max_error_streak: int
@@ -72,6 +82,20 @@ class ExchangeConfig:
 
 
 @dataclass
+class IndicatorsConfig:
+    atr_period: int
+    atr_spacing_multiplier: float
+    rsi_period: int
+    rsi_overbought: float
+    rsi_oversold: float
+    bb_period: int
+    bb_std: float
+    use_bollinger_bounds: bool
+    order_fraction: float    # fraction of max_exposure allocated per order
+    typical_atr_pct: float   # baseline ATR as fraction of price (used for vol scaling)
+
+
+@dataclass
 class PersistenceConfig:
     enabled: bool
     db_path: str
@@ -90,10 +114,12 @@ class AppConfig:
     performance: PerformanceConfig
     simulation: SimulationConfig
     sentiment: SentimentConfig
+    llm_risk: LLMRiskConfig
     health: HealthConfig
     profit_sweeper: ProfitSweeperConfig
     exchange: ExchangeConfig
     persistence: PersistenceConfig
+    indicators: IndicatorsConfig
 
 
 def _require(data: Dict[str, Any], key: str) -> Any:
@@ -107,6 +133,12 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
+def _optional(data: Optional[Dict[str, Any]], key: str, default: Any) -> Any:
+    if not data:
+        return default
+    return data.get(key, default)
+
+
 def load_config(path: str) -> AppConfig:
     cfg_raw = _load_yaml(Path(path))
     grid_raw = _require(cfg_raw, "grid")
@@ -114,6 +146,7 @@ def load_config(path: str) -> AppConfig:
     perf_raw = _require(cfg_raw, "performance")
     sim_raw = _require(cfg_raw, "simulation")
     sentiment_raw = _require(cfg_raw, "sentiment")
+    llm_raw = cfg_raw.get("llm_risk", {})
     health_raw = _require(cfg_raw, "health")
     sweeper_raw = _require(cfg_raw, "profit_sweeper")
     exch_raw = _require(cfg_raw, "exchange")
@@ -134,6 +167,7 @@ def load_config(path: str) -> AppConfig:
         crash_drop_pct=float(_require(risk_raw, "crash_drop_pct")),
         crash_window_ticks=int(_require(risk_raw, "crash_window_ticks")),
         cancel_open_orders_on_pause=bool(_require(risk_raw, "cancel_open_orders_on_pause")),
+        restore_state=bool(_optional(risk_raw, "restore_state", True)),
     )
 
     performance = PerformanceConfig(
@@ -155,6 +189,14 @@ def load_config(path: str) -> AppConfig:
     )
 
     sentiment = SentimentConfig(weight=float(_require(sentiment_raw, "weight")))
+
+    llm_risk = LLMRiskConfig(
+        enabled=bool(_optional(llm_raw, "enabled", False)),
+        max_daily_loss_pct=float(_optional(llm_raw, "max_daily_loss_pct", 0.0)),
+        max_drawdown_pct=float(_optional(llm_raw, "max_drawdown_pct", 0.0)),
+        max_crash_pct=float(_optional(llm_raw, "max_crash_pct", 0.0)),
+        block_on_news_risk=bool(_optional(llm_raw, "block_on_news_risk", True)),
+    )
 
     health = HealthConfig(
         max_stale_price_secs=int(_require(health_raw, "max_stale_price_secs")),
@@ -181,6 +223,20 @@ def load_config(path: str) -> AppConfig:
         restore_last_grid=bool(_require(persistence_raw, "restore_last_grid")),
     )
 
+    ind_raw = cfg_raw.get("indicators", {})
+    indicators = IndicatorsConfig(
+        atr_period=int(_optional(ind_raw, "atr_period", 14)),
+        atr_spacing_multiplier=float(_optional(ind_raw, "atr_spacing_multiplier", 0.5)),
+        rsi_period=int(_optional(ind_raw, "rsi_period", 14)),
+        rsi_overbought=float(_optional(ind_raw, "rsi_overbought", 70.0)),
+        rsi_oversold=float(_optional(ind_raw, "rsi_oversold", 30.0)),
+        bb_period=int(_optional(ind_raw, "bb_period", 20)),
+        bb_std=float(_optional(ind_raw, "bb_std", 2.0)),
+        use_bollinger_bounds=bool(_optional(ind_raw, "use_bollinger_bounds", True)),
+        order_fraction=float(_optional(ind_raw, "order_fraction", 0.10)),
+        typical_atr_pct=float(_optional(ind_raw, "typical_atr_pct", 0.005)),
+    )
+
     return AppConfig(
         mode=str(_require(cfg_raw, "mode")),
         symbol=str(_require(cfg_raw, "symbol")),
@@ -192,8 +248,10 @@ def load_config(path: str) -> AppConfig:
         performance=performance,
         simulation=simulation,
         sentiment=sentiment,
+        llm_risk=llm_risk,
         health=health,
         profit_sweeper=profit_sweeper,
         exchange=exchange,
         persistence=persistence,
+        indicators=indicators,
     )
